@@ -16,6 +16,6 @@
 # limitations under the License.
 
 volume_variables:
-  avg(P): scalar
   avg(T): scalar
+  avg(P): scalar
   avg(u): vector

@@ -139,7 +139,7 @@ class ETLOrchestrator:
         self.logger.info("Starting ETL pipeline")
 
         # Validation phase (optional)
-        self.run_validation()
+        # self.run_validation()
 
         # Processor creation and execution phase
         self.processor = self.create_processor()

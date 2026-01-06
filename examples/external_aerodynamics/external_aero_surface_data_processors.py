@@ -94,7 +94,7 @@ def default_surface_processing_for_external_aerodynamics_hlpw(
     # Extract mesh centers
     data.surface_mesh_centers = np.array(data.surface_polydata.cell_centers().points)
 
-    # Check if N_BF field exists - REQUIRED for HLPW
+    # Check if N_BF field exists - REQUIRED for HLPW dataset
     if nbf_field_name not in data.surface_polydata.cell_data:
         logger.error(
             f"Field '{nbf_field_name}' not found in surface cell_data. "

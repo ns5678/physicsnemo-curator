@@ -88,6 +88,12 @@ class ExternalAerodynamicsDataSource(DataSource):
             FileNotFoundError: Model type is volume/combined and volume data file is not found.
             FileNotFoundError: Model type is surface/combined and surface data file is not found.
         """
+
+        # Only process directories matching the pattern geo_LHCXXX_AoA_4
+        if not dirname.endswith("_AoA_4"):
+            self.logger.debug(f"Skipping {dirname} - does not match AoA_4 pattern")
+            return None
+
         car_dir = self.input_dir / dirname
 
         # Load STL geometry

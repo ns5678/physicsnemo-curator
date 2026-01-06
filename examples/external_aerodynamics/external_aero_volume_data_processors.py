@@ -158,10 +158,10 @@ def non_dimensionalize_volume_fields_hlpw(
     """Non-dimensionalize volume fields."""
 
     # Pressure
-    data.volume_fields[:, :1] = data.volume_fields[:, :1] / pref
+    data.volume_fields[:, :1] = data.volume_fields[:, :1] / tref
 
     # Temperature
-    data.volume_fields[:, 1:2] = data.volume_fields[:, 1:2] / tref
+    data.volume_fields[:, 1:2] = data.volume_fields[:, 1:2] / pref
 
     # Velocity
     data.volume_fields[:, 2:] = data.volume_fields[:, 2:] / uref
