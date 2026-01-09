@@ -21,15 +21,31 @@ for processing plasma modeling datasets.
 
 Usage:
     python run_etl.py \\
-        --config-name=plasma_etl \\
         etl.source.input_dir=/data/plasma/ \\
         etl.sink.output_dir=/data/plasma.processed
 """
 
+import logging
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
+
+
+def setup_logging() -> None:
+    """Configure logging for multiprocess ETL pipeline."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-8s | P%(process)d | %(name)s | %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+    # Reduce noise from external libraries
+    logging.getLogger("numba").setLevel(logging.WARNING)
+    logging.getLogger("pyvista").setLevel(logging.WARNING)
+
+
+setup_logging()
 
 import hydra
 from hydra.utils import instantiate
@@ -39,20 +55,19 @@ from physicsnemo_curator.etl.etl_orchestrator import ETLOrchestrator
 from physicsnemo_curator.etl.processing_config import ProcessingConfig
 from physicsnemo_curator.utils import utils as curator_utils
 
+logger = logging.getLogger(__name__)
 
-@hydra.main(version_base="1.3", config_path="config")
+
+@hydra.main(version_base="1.3", config_path="config", config_name="plasma_DryResist")
 def main(cfg: DictConfig) -> None:
-    """Run the Plasma Modeling ETL pipeline.
-
-    This function:
-    1. Sets up multiprocessing context
-    2. Creates the processing config
-    3. Instantiates all components (source, sink, transformations, validator)
-    4. Passes them to the orchestrator
-    5. Runs the pipeline
-    """
+    """Run the Plasma Modeling ETL pipeline."""
     # Set multiprocessing start method
     curator_utils.setup_multiprocessing()
+    
+    logger.info("Starting Plasma Modeling ETL pipeline")
+    logger.info(f"Input: {cfg.etl.source.input_dir}")
+    logger.info(f"Output: {cfg.etl.sink.output_dir}")
+    logger.info(f"Workers: {cfg.etl.processing.num_processes}")
 
     # Create processing config with common settings
     processing_config = ProcessingConfig(**cfg.etl.processing)
@@ -87,6 +102,8 @@ def main(cfg: DictConfig) -> None:
         validator=validator,
     )
     orchestrator.run()
+    
+    logger.info("ETL pipeline completed")
 
 
 if __name__ == "__main__":

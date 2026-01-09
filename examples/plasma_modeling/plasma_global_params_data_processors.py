@@ -19,11 +19,6 @@ import logging
 import numpy as np
 from schemas import PlasmaModelingExtractedDataInMemory
 
-logging.basicConfig(
-    format="%(asctime)s - Process %(process)d - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 logger = logging.getLogger(__name__)
 
 
@@ -115,7 +110,6 @@ def process_global_params(
     for name in global_parameters.keys():
         if name in sim_params:
             extracted_values[name] = sim_params[name]
-            logger.info(f"Extracted {name}={sim_params[name]} from parameters.yaml")
         else:
             raise ValueError(
                 f"Global parameter '{name}' not found in parameters.yaml. "

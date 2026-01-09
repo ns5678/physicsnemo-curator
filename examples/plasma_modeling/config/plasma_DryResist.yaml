@@ -56,6 +56,8 @@ etl:
       surface_processors:
         - _target_: plasma_surface_data_processors.normalize_surface_normals
           _partial_: true
+        - _target_: plasma_surface_data_processors.non_dimensionalize_surface_fields
+          _partial_: true
         - _target_: plasma_surface_data_processors.update_surface_data_to_float32
           _partial_: true
 

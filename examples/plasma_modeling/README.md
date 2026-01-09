@@ -17,18 +17,25 @@ input_dir/
 
 ## Run with Docker
 
+> **Note:** Container runs as root for pip install. Fix output file permissions with `chown` after processing.
+
 ### Generic
 ```bash
 docker run -it --gpus all \
     -v /path/to/dataset:/data \
     -v /path/to/physicsnemo-curator:/workspace \
-    -w /workspace/examples/plasma_modeling \
     nvcr.io/nvidia/physicsnemo/physicsnemo:25.11
 
 # Inside container:
+cd /workspace && pip install -e .
+cd examples/plasma_modeling
 python run_etl.py \
     etl.source.input_dir=/data/train \
     etl.sink.output_dir=/data/processed_zarr
+exit
+
+# Fix permissions on host:
+sudo chown -R $(id -u):$(id -g) /path/to/dataset/processed_zarr
 ```
 
 ### DryResist Dataset on Sheel's Workstation
@@ -36,13 +43,18 @@ python run_etl.py \
 docker run -it --gpus all \
     -v /mnt/work/snidhan/LAM-Plasma-Modeling/data/DryResist_DataSet-1_1-256_simulations:/data \
     -v /mnt/work/snidhan/LAM-Plasma-Modeling/physicsnemo-curator:/workspace \
-    -w /workspace/examples/plasma_modeling \
     nvcr.io/nvidia/physicsnemo/physicsnemo:25.11
 
 # Inside container:
+cd /workspace && pip install -e .
+cd examples/plasma_modeling
 python run_etl.py \
     etl.source.input_dir=/data/organized_dataset/train \
     etl.sink.output_dir=/data/processed_zarr
+exit
+
+# Fix permissions on host:
+sudo chown -R $(id -u):$(id -g) /mnt/work/snidhan/LAM-Plasma-Modeling/data/DryResist_DataSet-1_1-256_simulations/processed_zarr
 ```
 
 ## Output

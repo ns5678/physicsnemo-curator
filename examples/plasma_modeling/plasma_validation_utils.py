@@ -23,11 +23,6 @@ from typing import Tuple
 
 import numpy as np
 
-logging.basicConfig(
-    format="%(asctime)s - Process %(process)d - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 logger = logging.getLogger(__name__)
 
 

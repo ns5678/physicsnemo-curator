@@ -26,11 +26,6 @@ from plasma_validation_utils import (
 )
 from schemas import PlasmaModelingExtractedDataInMemory
 
-logging.basicConfig(
-    format="%(asctime)s - Process %(process)d - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 logger = logging.getLogger(__name__)
 
 
@@ -83,11 +78,6 @@ def default_surface_processing_for_plasma(
     # Compute cell areas
     areas_mesh = polydata.compute_cell_sizes(length=False, area=True, volume=False)
     data.surface_areas = np.array(areas_mesh.cell_data["Area"])
-
-    logger.info(
-        f"Extracted surface data: {data.surface_fields.shape[0]} cells, "
-        f"{data.surface_fields.shape[1]} field components"
-    )
 
     return data
 
@@ -195,6 +185,9 @@ def non_dimensionalize_surface_fields(
     
     Bounds are defined in constants.DryResistConstants and retrieved
     via get_normalization_bounds().
+    
+    Note: Division is performed in float64 for precision (values span many orders
+    of magnitude), then cast back to float32.
 
     Args:
         data: Plasma modeling data with surface fields
@@ -210,18 +203,23 @@ def non_dimensionalize_surface_fields(
 
     bounds = get_normalization_bounds()
     
+    # Cast to float64 for precision during division
+    fields_f64 = data.surface_fields.astype(np.float64)
+    
     for i, var_name in enumerate(data.surface_variable_names):
         if var_name in bounds:
-            vmin, vmax = bounds[var_name]
-            denom = vmax - vmin
-            if denom > 0:
-                data.surface_fields[:, i] = (data.surface_fields[:, i] - vmin) / denom
+            _, vmax = bounds[var_name]
+            vmax = np.float64(vmax)
+            if vmax != 0:
+                fields_f64[:, i] = fields_f64[:, i] / vmax
             else:
-                logger.warning(f"Zero range for {var_name}, skipping normalization")
+                logger.warning(f"Zero vmax for {var_name}, skipping normalization")
         else:
             logger.warning(f"No normalization bounds for '{var_name}', skipping")
 
-    logger.info(f"Non-dimensionalized {len(bounds)} surface variables to [0, 1] range")
+    # Cast back to float32
+    data.surface_fields = fields_f64.astype(np.float32)
+
     return data
 
 

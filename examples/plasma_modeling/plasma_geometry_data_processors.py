@@ -20,11 +20,6 @@ import numpy as np
 from plasma_utils import to_float32
 from schemas import PlasmaModelingExtractedDataInMemory
 
-logging.basicConfig(
-    format="%(asctime)s - Process %(process)d - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 logger = logging.getLogger(__name__)
 
 
