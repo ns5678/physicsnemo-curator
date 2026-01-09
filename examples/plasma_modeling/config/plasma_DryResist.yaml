@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+defaults:
+  - /variables/surface: dryresist
+  - /variables/global: dryresist
+  - /serialization_format: zarr
+  - /override_transformations: ${serialization_format}
+  - _self_
+
+etl:
+  # Common settings used across components
+  common:
+    kind: dryresist
+    model_type: surface
+
+  processing:
+    num_processes: 12
+    args: {}
+
+  source:
+    _target_: data_sources.PlasmaModelingDataSource
+    _convert_: all
+
+    input_dir: ???  # Path to input dataset directory (required)
+    kind: ${etl.common.kind}
+    model_type: ${etl.common.model_type}
+
+  transformations:
+
+    # STL geometry preprocessing
+    stl_preprocessing:
+      _target_: data_transformations.PlasmaModelingSTLTransformation
+      _convert_: all
+      geometry_processors:
+        - _target_: plasma_geometry_data_processors.update_geometry_data_to_float32
+          _partial_: true
+
+    # Surface data preprocessing
+    surface_preprocessing:
+      _target_: data_transformations.PlasmaModelingSurfaceTransformation
+      _convert_: all
+      surface_processors:
+        - _target_: plasma_surface_data_processors.normalize_surface_normals
+          _partial_: true
+        - _target_: plasma_surface_data_processors.update_surface_data_to_float32
+          _partial_: true
+
+    # Global parameters preprocessing (reads from parameters.yaml)
+    global_params_preprocessing:
+      _target_: data_transformations.PlasmaModelingGlobalParamsTransformation
+      _convert_: all
+      global_parameters: ${etl.global_parameters}
+      global_params_processors:
+        - _target_: plasma_global_params_data_processors.process_global_params
+          _partial_: true
+
+    write_ready_transformation: ${override_transformations.write_ready_transformation}
+
+  sink:
+    _target_: data_sources.PlasmaModelingDataSource
+    _convert_: all
+
+    output_dir: ???  # Path to output directory (required)
+    kind: ${etl.common.kind}
+    serialization_method: ${serialization_format.serialization_method}
+    overwrite_existing: true

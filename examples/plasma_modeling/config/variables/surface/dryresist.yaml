@@ -1,0 +1,46 @@
+# @package etl.transformations.surface_preprocessing
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Surface variables from DryResist VTP files (cell data)
+surface_variables:
+  # Flow variables
+  density(kg/m3): scalar
+  x_velocity(m/s): scalar
+  y_velocity(m/s): scalar
+  temperature(K): scalar
+  pressure(Pa): scalar
+  rho_e(J/m3): scalar
+  rho_u(kg/m2-s): scalar
+  rho_v(kg/m2-s): scalar
+  # Species densities
+  rho_SAGA(kg/m3): scalar
+  rho_H2O(kg/m3): scalar
+  rho_AR(kg/m3): scalar
+  rho_RSn(N(CH3)2)3H2O(kg/m3): scalar
+  rho_NH(CH3)2(kg/m3): scalar
+  rho_RSn(N(CH3)2)2OH(kg/m3): scalar
+  rho_RSn(N(CH3)2)2OHH2O(kg/m3): scalar
+  rho_RSn(N(CH3)2)(OH)2(kg/m3): scalar
+  rho_RSn(N(CH3)2)(OH)2H2O(kg/m3): scalar
+  rho_RSn(OH)3(kg/m3): scalar
+  rho_RSn(OH)2O(OH)2SnR(kg/m3): scalar
+  rho_(RSnO)2(OH)2(kg/m3): scalar
+  rho_(RSnO)3(OH)3(kg/m3): scalar
+  rho_(RSnO)4O(OH)2(kg/m3): scalar
+  rho_(RSnO)5O2(OH)(kg/m3): scalar
+  rho_(RSnO)6O2(OH)2(kg/m3): scalar
+  rho_(RSnO)12O4(OH)4(kg/m3): scalar
