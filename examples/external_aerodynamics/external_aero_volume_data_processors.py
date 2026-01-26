@@ -151,17 +151,18 @@ def non_dimensionalize_volume_fields(
 
 def non_dimensionalize_volume_fields_hlpw(
     data: ExternalAerodynamicsExtractedDataInMemory,
-    pref: PhysicsConstantsHLPW.PREF,
-    tref: PhysicsConstantsHLPW.TREF,
-    uref: PhysicsConstantsHLPW.UREF,
+    pref: float = PhysicsConstantsHLPW.PREF,
+    tref: float = PhysicsConstantsHLPW.TREF,
+    uref: float = PhysicsConstantsHLPW.UREF,
+    qref: float = PhysicsConstantsHLPW.QREF,
 ) -> ExternalAerodynamicsExtractedDataInMemory:
     """Non-dimensionalize volume fields."""
 
-    # Pressure
+    # Temperature
     data.volume_fields[:, :1] = data.volume_fields[:, :1] / tref
 
-    # Temperature
-    data.volume_fields[:, 1:2] = data.volume_fields[:, 1:2] / pref
+    # Non-dimensionalize pressure to get Cp
+    data.volume_fields[:, 1:2] = (data.volume_fields[:, 1:2] - pref) / qref
 
     # Velocity
     data.volume_fields[:, 2:] = data.volume_fields[:, 2:] / uref

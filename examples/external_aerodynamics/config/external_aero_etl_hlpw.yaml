@@ -44,6 +44,7 @@ etl:
           _partial_: true
           pref: 176.352
           tref: 518.67
+          qref: 4.94
         - _target_: external_aero_surface_data_processors.update_surface_data_to_float32
           _partial_: true
 
@@ -56,6 +57,7 @@ etl:
           pref: 176.352
           tref: 518.67
           uref: 2679.505
+          qref: 4.94
         - _target_: external_aero_volume_data_processors.update_volume_data_to_float32
           _partial_: true
         - _target_: external_aero_volume_data_processors.shuffle_volume_data

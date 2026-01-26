@@ -34,9 +34,10 @@ class PhysicsConstantsCarAerodynamics:
 class PhysicsConstantsHLPW:
     """Physical constants used in the simulation for HLPW dataset."""
 
-    PREF: float = 176.352  # HLPW reference pressure
-    UREF: float = 2679.505  # HLPW reference velocity
+    PREF: float = 176.35  # HLPW reference pressure
+    UREF: float = 2679.51  # HLPW reference velocity
     TREF: float = 518.67  # HLPW reference temperature
+    QREF: float = 4.94  # HLPW reference
 
 
 class ModelType(str, Enum):
@@ -83,6 +84,6 @@ def get_physics_constants(kind: DatasetKind) -> dict[str, float]:
         return {"air_density": c.AIR_DENSITY, "stream_velocity": c.STREAM_VELOCITY}
     elif kind == DatasetKind.HLPW:
         c = PhysicsConstantsHLPW()
-        return {"pref": c.PREF, "uref": c.UREF, "tref": c.TREF}
+        return {"pref": c.PREF, "uref": c.UREF, "tref": c.TREF, "qref": c.QREF}
     else:
         raise ValueError(f"Unknown dataset kind: {kind}")

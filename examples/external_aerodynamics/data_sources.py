@@ -300,10 +300,19 @@ class ExternalAerodynamicsDataSource(DataSource):
         if self.overwrite_existing:
             return False
 
-        output_path = self._get_output_path(filename)
-        if output_path.exists():
-            self.logger.info(f"Skipping {filename} - File already exists")
-            return True
+        # Check base output dir and subdirs (train, val, test)
+        ext = ".npz" if self.serialization_method == "numpy" else ".zarr"
+        paths_to_check = [
+            self.output_dir / f"{filename}{ext}",
+            self.output_dir / "train" / f"{filename}{ext}",
+            self.output_dir / "val" / f"{filename}{ext}",
+            self.output_dir / "test" / f"{filename}{ext}",
+        ]
+
+        for path in paths_to_check:
+            if path.exists():
+                self.logger.info(f"Skipping {filename} - File already exists at {path}")
+                return True
         return False
 
     def cleanup_temp_files(self) -> None:
