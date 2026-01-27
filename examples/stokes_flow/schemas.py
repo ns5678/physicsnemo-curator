@@ -17,8 +17,8 @@
 """
 Data schemas for Stokes flow pipeline.
 
-Key difference from external_aerodynamics: Volume data is point-centered,
-not cell-centered. Uses volume_mesh_points instead of volume_mesh_centers.
+Volume data is cell-centered: volume_mesh_points stores cell centers and
+volume_fields stores field values interpolated to cell centers.
 """
 
 from dataclasses import dataclass
@@ -53,7 +53,7 @@ class StokesFlowMetadata:
     # Mesh statistics
     num_stl_points: Optional[int] = None
     num_stl_faces: Optional[int] = None
-    num_volume_points: Optional[int] = None
+    num_volume_cells: Optional[int] = None
 
     # Zarr format version
     zarr_format: Optional[int] = None
@@ -63,11 +63,12 @@ class StokesFlowMetadata:
 class StokesFlowExtractedDataInMemory:
     """Container for Stokes flow data extracted from simulation files.
 
-    Key difference: volume data is point-centered (volume_mesh_points)
-    rather than cell-centered.
+    Volume data is cell-centered: volume_mesh_points stores cell centers
+    and volume_fields stores field values interpolated to cell centers.
 
     Version history:
     - 1.0: Initial version with STL geometry + point-centered volume data.
+    - 2.0: Changed to cell-centered volume data.
     """
 
     # Metadata
@@ -83,9 +84,18 @@ class StokesFlowExtractedDataInMemory:
     stl_faces: Optional[np.ndarray] = None  # (N_faces * 3,) flattened
     stl_areas: Optional[np.ndarray] = None  # (N_faces,)
 
-    # Processed volume data - POINT-CENTERED (not cell-centered!)
-    volume_mesh_points: Optional[np.ndarray] = None  # (N_points, 3)
-    volume_fields: Optional[np.ndarray] = None  # (N_points, 3) for [u, v, p]
+    # Processed volume data - CELL-CENTERED
+    volume_mesh_points: Optional[np.ndarray] = None  # (N_cells, 3) cell centers
+    volume_fields: Optional[np.ndarray] = None  # (N_cells, 3) for [u, v, p]
+
+    # FVM connectivity data (cell-centered)
+    cell_centers: Optional[np.ndarray] = None  # (N_cells, 3)
+    cell_volumes: Optional[np.ndarray] = None  # (N_cells,)
+    face_owner: Optional[np.ndarray] = None  # (N_faces,) int32
+    face_neighbor: Optional[np.ndarray] = None  # (N_faces,) int32, -1 for boundary
+    face_area: Optional[np.ndarray] = None  # (N_faces,)
+    face_normal: Optional[np.ndarray] = None  # (N_faces, 3)
+    face_centers: Optional[np.ndarray] = None  # (N_faces, 3)
 
 
 @dataclass(frozen=True)
@@ -108,6 +118,7 @@ class StokesFlowZarrDataInMemory:
 
     Version history:
     - 1.0: Initial version with STL geometry + point-centered volume data
+    - 2.0: Changed to cell-centered volume data
     """
 
     # Metadata
@@ -119,6 +130,17 @@ class StokesFlowZarrDataInMemory:
     stl_faces: PreparedZarrArrayInfo
     stl_areas: PreparedZarrArrayInfo
 
-    # Volume data - point-centered
-    volume_mesh_points: Optional[PreparedZarrArrayInfo] = None
-    volume_fields: Optional[PreparedZarrArrayInfo] = None
+    # Volume data - cell-centered
+    volume_mesh_points: Optional[PreparedZarrArrayInfo] = (
+        None  # (N_cells, 3) cell centers
+    )
+    volume_fields: Optional[PreparedZarrArrayInfo] = None  # (N_cells, 3) for [u, v, p]
+
+    # FVM connectivity data
+    cell_centers: Optional[PreparedZarrArrayInfo] = None
+    cell_volumes: Optional[PreparedZarrArrayInfo] = None
+    face_owner: Optional[PreparedZarrArrayInfo] = None
+    face_neighbor: Optional[PreparedZarrArrayInfo] = None
+    face_area: Optional[PreparedZarrArrayInfo] = None
+    face_normal: Optional[PreparedZarrArrayInfo] = None
+    face_centers: Optional[PreparedZarrArrayInfo] = None

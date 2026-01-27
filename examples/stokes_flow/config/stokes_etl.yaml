@@ -45,16 +45,15 @@ etl:
         - _target_: stokes_geometry_processors.update_geometry_to_float32
           _partial_: true
 
-    # Volume data transformation (point-centered)
+    # Volume data transformation (cell-centered)
     volume_preprocessing:
       _target_: data_transformations.StokesFlowVolumeTransformation
       _convert_: all
       volume_processors:
+        - _target_: stokes_volume_processors.compute_fvm_connectivity
+          _partial_: true
         - _target_: stokes_volume_processors.update_volume_to_float32
           _partial_: true
-        - _target_: stokes_volume_processors.shuffle_volume_data
-          _partial_: true
-          seed: 42
 
     # Zarr format transformation
     write_ready_transformation:

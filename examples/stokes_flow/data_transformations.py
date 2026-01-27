@@ -247,4 +247,12 @@ class StokesFlowZarrTransformation(DataTransformation):
             # Volume data (point-centered)
             volume_mesh_points=self._prepare_array(data.volume_mesh_points),
             volume_fields=self._prepare_array(data.volume_fields),
+            # FVM connectivity
+            cell_centers=self._prepare_array(data.cell_centers),
+            cell_volumes=self._prepare_array(data.cell_volumes),
+            face_owner=self._prepare_int_array(data.face_owner),
+            face_neighbor=self._prepare_int_array(data.face_neighbor),
+            face_area=self._prepare_array(data.face_area),
+            face_normal=self._prepare_array(data.face_normal),
+            face_centers=self._prepare_array(data.face_centers),
         )

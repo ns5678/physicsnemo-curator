@@ -23,7 +23,6 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import pyvista as pv
 import zarr
 from constants import DatasetKind, ModelType, get_physics_constants
@@ -193,12 +192,35 @@ class StokesFlowDataSource(DataSource):
                     data=array_info.data,
                     chunks=array_info.chunks,
                     shards=array_info.shards,
-                    compressors=array_info.compressor
-                    if array_info.compressor
-                    else None,
+                    compressors=(
+                        array_info.compressor if array_info.compressor else None
+                    ),
                 )
             else:
                 self.logger.warning(f"{field} is absent in the dataset")
+
+        # Write FVM connectivity arrays if present
+        fvm_fields = [
+            "cell_centers",
+            "cell_volumes",
+            "face_owner",
+            "face_neighbor",
+            "face_area",
+            "face_normal",
+            "face_centers",
+        ]
+        for field in fvm_fields:
+            array_info = getattr(data, field, None)
+            if array_info is not None:
+                root.create_array(
+                    name=field,
+                    data=array_info.data,
+                    chunks=array_info.chunks,
+                    shards=array_info.shards,
+                    compressors=(
+                        array_info.compressor if array_info.compressor else None
+                    ),
+                )
 
     def should_skip(self, filename: str) -> bool:
         """Check whether the file should be skipped.
