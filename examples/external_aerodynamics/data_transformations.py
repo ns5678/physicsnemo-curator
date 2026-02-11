@@ -41,6 +41,7 @@ from schemas import (
     ExternalAerodynamicsNumpyMetadata,
     ExternalAerodynamicsZarrDataInMemory,
     PreparedZarrArrayInfo,
+    VolumePartitionZarrData,
 )
 
 from physicsnemo_curator.etl.data_transformations import DataTransformation
@@ -425,6 +426,46 @@ class ExternalAerodynamicsZarrTransformation(DataTransformation):
             compressor=None,  # No compression
         )
 
+    def _prepare_int_array(self, array: np.ndarray) -> PreparedZarrArrayInfo:
+        """Prepare integer array (face indices) for Zarr storage."""
+        if array is None:
+            return None
+
+        target_chunk_size = int(self.chunk_size_mb * 1024 * 1024)
+        item_size = array.itemsize
+        chunk_size = min(len(array), target_chunk_size // item_size)
+        chunks = (chunk_size,)
+
+        ideal_shard_size = chunks[0] * self.chunks_per_shard
+        if len(array) <= ideal_shard_size:
+            num_chunks = (len(array) + chunks[0] - 1) // chunks[0]
+            shard_size = num_chunks * chunks[0]
+        else:
+            shard_size = ideal_shard_size
+        shards = (shard_size,)
+
+        return PreparedZarrArrayInfo(
+            data=np.int32(array),
+            chunks=chunks,
+            compressor=self.compressor,
+            shards=shards,
+        )
+
+    def _prepare_partition(self, partition) -> VolumePartitionZarrData:
+        """Prepare a single VolumePartitionData for Zarr storage."""
+        return VolumePartitionZarrData(
+            cell_centers=self._prepare_array(partition.cell_centers),
+            cell_fields=self._prepare_array(partition.cell_fields),
+            cell_volumes=self._prepare_array(partition.cell_volumes),
+            is_halo=self._prepare_int_array(partition.is_halo),
+            n_owned_cells=partition.n_owned_cells,
+            face_owner=self._prepare_int_array(partition.face_owner),
+            face_neighbor=self._prepare_int_array(partition.face_neighbor),
+            face_area=self._prepare_array(partition.face_area),
+            face_normal=self._prepare_array(partition.face_normal),
+            face_centers=self._prepare_array(partition.face_centers),
+        )
+
     def transform(
         self, data: ExternalAerodynamicsExtractedDataInMemory
     ) -> ExternalAerodynamicsZarrDataInMemory:
@@ -441,6 +482,13 @@ class ExternalAerodynamicsZarrTransformation(DataTransformation):
                 - Compression settings
                 - Chunking configurations
         """
+        # Prepare per-partition Zarr data if partitioning was applied
+        volume_partitions = None
+        if data.volume_partitions is not None:
+            volume_partitions = [
+                self._prepare_partition(p) for p in data.volume_partitions
+            ]
+
         return ExternalAerodynamicsZarrDataInMemory(
             stl_coordinates=self._prepare_array(data.stl_coordinates),
             stl_centers=self._prepare_array(data.stl_centers),
@@ -458,6 +506,8 @@ class ExternalAerodynamicsZarrTransformation(DataTransformation):
             surface_normals=self._prepare_array(data.surface_normals),
             surface_areas=self._prepare_array(data.surface_areas),
             surface_fields=self._prepare_array(data.surface_fields),
+            # Volume data: partitioned or flat (backward compatible)
             volume_mesh_centers=self._prepare_array(data.volume_mesh_centers),
             volume_fields=self._prepare_array(data.volume_fields),
+            volume_partitions=volume_partitions,
         )
