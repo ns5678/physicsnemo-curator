@@ -15,9 +15,14 @@
 # limitations under the License.
 
 import logging
+import time
 from typing import Optional
 
 import numpy as np
+import vtk
+from numba import njit
+from tqdm import tqdm
+
 from constants import (
     PhysicsConstantsCarAerodynamics,
     PhysicsConstantsHLPW,
@@ -257,5 +262,178 @@ def shuffle_volume_data(
     indices = rng.permutation(len(data.volume_mesh_centers))
     data.volume_mesh_centers = data.volume_mesh_centers[indices]
     data.volume_fields = data.volume_fields[indices]
+
+    return data
+
+
+# ---------------------------------------------------------------------------
+# FVM face connectivity extraction
+# Ported from sn/stokes-flow branch (stokes_volume_processors.py)
+# ---------------------------------------------------------------------------
+
+
+@njit(fastmath=True)
+def _compute_face_geometry_numba(point_ids, points, cell_center):
+    """Compute face area, normal, and center using numba."""
+    n_points = len(point_ids)
+    p0 = points[point_ids[0]]
+    area_vec = np.zeros(3)
+
+    for i in range(1, n_points - 1):
+        p1 = points[point_ids[i]]
+        p2 = points[point_ids[i + 1]]
+        edge1 = p1 - p0
+        edge2 = p2 - p0
+        area_vec[0] += edge1[1] * edge2[2] - edge1[2] * edge2[1]
+        area_vec[1] += edge1[2] * edge2[0] - edge1[0] * edge2[2]
+        area_vec[2] += edge1[0] * edge2[1] - edge1[1] * edge2[0]
+
+    area_mag = np.sqrt(area_vec[0] ** 2 + area_vec[1] ** 2 + area_vec[2] ** 2)
+    if area_mag < 1e-30:
+        return 0.0, np.zeros(3), np.zeros(3)
+
+    area = 0.5 * area_mag
+    normal = area_vec / area_mag
+
+    face_center = np.zeros(3)
+    for i in range(n_points):
+        face_center += points[point_ids[i]]
+    face_center /= n_points
+
+    # Orient normal outward from owner cell
+    face_to_cell = cell_center - face_center
+    if (
+        normal[0] * face_to_cell[0]
+        + normal[1] * face_to_cell[1]
+        + normal[2] * face_to_cell[2]
+        > 0
+    ):
+        normal = -normal
+
+    return area, normal, face_center
+
+
+def _build_face_connectivity(ugrid):
+    """Build face connectivity from VTK unstructured grid."""
+    from vtk.util import numpy_support
+
+    logger.info("Building face connectivity...")
+    t0 = time.time()
+
+    n_cells = ugrid.GetNumberOfCells()
+    points = numpy_support.vtk_to_numpy(ugrid.GetPoints().GetData()).astype(np.float64)
+
+    cell_centers_filter = vtk.vtkCellCenters()
+    cell_centers_filter.SetInputData(ugrid)
+    cell_centers_filter.Update()
+    cell_centers = numpy_support.vtk_to_numpy(
+        cell_centers_filter.GetOutput().GetPoints().GetData()
+    ).astype(np.float64)
+
+    face_to_cells = {}
+    for cell_idx in tqdm(range(n_cells), desc="  Extracting faces", unit="cells"):
+        cell = ugrid.GetCell(cell_idx)
+        n_faces = cell.GetNumberOfFaces()
+        for face_idx in range(n_faces):
+            face = cell.GetFace(face_idx)
+            face_point_ids = face.GetPointIds()
+            n_pts = face_point_ids.GetNumberOfIds()
+            face_pts = tuple(sorted([face_point_ids.GetId(i) for i in range(n_pts)]))
+            if face_pts not in face_to_cells:
+                face_to_cells[face_pts] = []
+            face_to_cells[face_pts].append(
+                (
+                    cell_idx,
+                    np.array(
+                        [face_point_ids.GetId(i) for i in range(n_pts)], dtype=np.int64
+                    ),
+                )
+            )
+
+    face_owner = []
+    face_neighbor = []
+    face_area = []
+    face_normal = []
+    face_center_list = []
+
+    for face_pts_sorted, cell_list in tqdm(
+        face_to_cells.items(), desc="  Computing geometry", unit="faces"
+    ):
+        if len(cell_list) == 2:
+            (cell1, pts1), (cell2, pts2) = cell_list
+            owner, neighbor = (cell1, cell2) if cell1 < cell2 else (cell2, cell1)
+            face_pts = pts1
+        elif len(cell_list) == 1:
+            owner = cell_list[0][0]
+            neighbor = -1
+            face_pts = cell_list[0][1]
+        else:
+            continue
+
+        area, normal, fc = _compute_face_geometry_numba(
+            face_pts, points, cell_centers[owner]
+        )
+        if area < 1e-30:
+            continue
+
+        face_owner.append(owner)
+        face_neighbor.append(neighbor)
+        face_area.append(area)
+        face_normal.append(normal)
+        face_center_list.append(fc)
+
+    logger.info(f"  {len(face_owner):,} faces built in {time.time() - t0:.2f}s")
+
+    return {
+        "n_faces": len(face_owner),
+        "face_owner": np.array(face_owner, dtype=np.int32),
+        "face_neighbor": np.array(face_neighbor, dtype=np.int32),
+        "face_area": np.array(face_area, dtype=np.float32),
+        "face_normal": np.array(face_normal, dtype=np.float32),
+        "face_centers": np.array(face_center_list, dtype=np.float32),
+    }
+
+
+def compute_fvm_connectivity(
+    data: ExternalAerodynamicsExtractedDataInMemory,
+) -> ExternalAerodynamicsExtractedDataInMemory:
+    """Compute FVM face connectivity from volume mesh.
+
+    Builds face-based connectivity arrays needed for FVM residual kernels.
+    Must be called before volume_unstructured_grid is released.
+
+    Args:
+        data: data object with volume_unstructured_grid loaded
+
+    Returns:
+        Data with FVM connectivity arrays populated
+    """
+    import pyvista as pv
+
+    ugrid = data.volume_unstructured_grid
+    if ugrid is None:
+        logger.warning("No volume_unstructured_grid available for FVM connectivity")
+        return data
+
+    # Build face connectivity (expensive VTK traversal)
+    logger.info(f"[{data.metadata.filename}] Building FVM face connectivity...")
+    face_data = _build_face_connectivity(ugrid)
+
+    data.face_owner = face_data["face_owner"]
+    data.face_neighbor = face_data["face_neighbor"]
+    data.face_area = face_data["face_area"]
+    data.face_normal = face_data["face_normal"]
+    data.face_centers = face_data["face_centers"]
+
+    # Cell geometry
+    mesh = pv.wrap(ugrid)
+    data.cell_centers = np.array(mesh.cell_centers().points, dtype=np.float32)
+    sized = mesh.compute_cell_sizes(length=False, area=False, volume=True)
+    data.cell_volumes = np.array(sized.cell_data["Volume"], dtype=np.float32)
+
+    logger.info(
+        f"[{data.metadata.filename}] FVM: {len(data.cell_centers)} cells, "
+        f"{face_data['n_faces']} faces"
+    )
 
     return data

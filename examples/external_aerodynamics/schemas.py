@@ -92,7 +92,8 @@ class ExternalAerodynamicsExtractedDataInMemory:
     volume_mesh_centers: Optional[np.ndarray] = None  # (N_cells, 3)
     volume_fields: Optional[np.ndarray] = None  # (N_cells, n_vars)
 
-    # Face connectivity data (populated by compute_fvm_connectivity)
+    # Cell and face connectivity data (populated by compute_fvm_connectivity)
+    cell_centers: Optional[np.ndarray] = None  # (N_cells, 3) float32, cell centroids
     face_owner: Optional[np.ndarray] = None  # (N_faces,) int32
     face_neighbor: Optional[np.ndarray] = None  # (N_faces,) int32, -1 for boundary
     face_area: Optional[np.ndarray] = None  # (N_faces,) float32
