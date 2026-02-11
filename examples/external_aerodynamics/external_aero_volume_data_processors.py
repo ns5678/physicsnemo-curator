@@ -20,9 +20,6 @@ from typing import Optional
 
 import numpy as np
 import vtk
-from numba import njit
-from tqdm import tqdm
-
 from constants import (
     PhysicsConstantsCarAerodynamics,
     PhysicsConstantsHLPW,
@@ -32,7 +29,9 @@ from external_aero_validation_utils import (
     check_field_statistics,
     check_volume_physics_bounds,
 )
+from numba import njit
 from schemas import ExternalAerodynamicsExtractedDataInMemory
+from tqdm import tqdm
 
 logging.basicConfig(
     format="%(asctime)s - Process %(process)d - %(levelname)s - %(message)s",
@@ -435,5 +434,203 @@ def compute_fvm_connectivity(
         f"[{data.metadata.filename}] FVM: {len(data.cell_centers)} cells, "
         f"{face_data['n_faces']} faces"
     )
+
+    return data
+
+
+# ---------------------------------------------------------------------------
+# METIS mesh partitioning
+# ---------------------------------------------------------------------------
+
+
+def partition_volume_mesh(
+    data: ExternalAerodynamicsExtractedDataInMemory,
+    num_partitions: int = 100,
+    halo_depth: int = 1,
+) -> ExternalAerodynamicsExtractedDataInMemory:
+    """Partition volume mesh into METIS subdomains with halo cells.
+
+    Requires compute_fvm_connectivity to have run first.
+    Replaces shuffle_volume_data in the processor chain.
+
+    Each partition is a self-contained VolumePartitionData with
+    partition-local face indices. Owned cells are ordered first,
+    then halo cells.
+
+    Args:
+        data: data object with face connectivity arrays populated
+        num_partitions: number of METIS partitions
+        halo_depth: number of ghost cell layers (1 for first-order FVM)
+
+    Returns:
+        data with volume_partitions populated, intermediate face/cell
+        connectivity arrays set to None
+    """
+    from collections import defaultdict
+
+    import pymetis
+    from schemas import VolumePartitionData
+
+    if data.face_owner is None or data.face_neighbor is None:
+        raise ValueError(
+            "Face connectivity not found on data object. "
+            "Run compute_fvm_connectivity before partition_volume_mesh."
+        )
+
+    n_cells = len(data.cell_centers)
+    face_owner = data.face_owner
+    face_neighbor = data.face_neighbor
+
+    logger.info(
+        f"[{data.metadata.filename}] Partitioning {n_cells} cells into "
+        f"{num_partitions} partitions with halo_depth={halo_depth}"
+    )
+
+    # Step 1: Derive cell adjacency from face_owner / face_neighbor
+    t0 = time.time()
+    adjacency = [[] for _ in range(n_cells)]
+    internal_mask = face_neighbor >= 0
+    for o, n in zip(face_owner[internal_mask], face_neighbor[internal_mask]):
+        adjacency[o].append(n)
+        adjacency[n].append(o)
+    logger.info(f"  Adjacency derived in {time.time() - t0:.2f}s")
+
+    # Step 2: METIS partitioning
+    t1 = time.time()
+    adjacency_copy = [list(nbrs) for nbrs in adjacency]  # pymetis mutates input
+    n_cuts, membership = pymetis.part_graph(num_partitions, adjacency=adjacency_copy)
+    logger.info(f"  METIS: {n_cuts} edge cuts in {time.time() - t1:.2f}s")
+
+    # Step 3: Identify interface cells per partition
+    interface_cells = [set() for _ in range(num_partitions)]
+    for face_idx in range(len(face_owner)):
+        o = face_owner[face_idx]
+        n = face_neighbor[face_idx]
+        if n < 0:
+            continue
+        if membership[o] != membership[n]:
+            interface_cells[membership[o]].add(o)
+            interface_cells[membership[n]].add(n)
+
+    # Step 3b: Build face-to-partition candidate index
+    partition_face_candidates = defaultdict(list)
+    for face_idx in range(len(face_owner)):
+        o = face_owner[face_idx]
+        n = face_neighbor[face_idx]
+        if n == -1:
+            partition_face_candidates[membership[o]].append(face_idx)
+        else:
+            partition_face_candidates[membership[o]].append(face_idx)
+            if membership[n] != membership[o]:
+                partition_face_candidates[membership[n]].append(face_idx)
+
+    # Steps 4-8: Build each partition
+    t2 = time.time()
+    partitions = []
+
+    for part_id in range(num_partitions):
+        # Step 4: BFS halo expansion from interface cells
+        owned = {i for i, p in enumerate(membership) if p == part_id}
+
+        if len(owned) == 0:
+            logger.warning(f"  Partition {part_id} is empty, skipping")
+            continue
+
+        halo = set()
+        frontier = interface_cells[part_id]
+
+        for layer in range(halo_depth):
+            next_frontier = set()
+            for cell_id in frontier:
+                for nbr in adjacency[cell_id]:
+                    if nbr not in owned and nbr not in halo:
+                        halo.add(nbr)
+                        next_frontier.add(nbr)
+            frontier = next_frontier
+
+        # Step 5: Order cells — owned first, then halo
+        owned_list = sorted(owned)
+        halo_list = sorted(halo)
+        all_cells = owned_list + halo_list
+        n_owned = len(owned_list)
+
+        # Step 6: Global-to-local cell index map
+        global_to_local = {g: loc for loc, g in enumerate(all_cells)}
+        cell_set = set(all_cells)
+
+        # Step 7: Filter and remap faces using precomputed index
+        local_face_owner = []
+        local_face_neighbor = []
+        local_face_area = []
+        local_face_normal = []
+        local_face_centers = []
+
+        for face_idx in partition_face_candidates[part_id]:
+            o = face_owner[face_idx]
+            n = face_neighbor[face_idx]
+
+            if n == -1:
+                if o in cell_set:
+                    local_face_owner.append(global_to_local[o])
+                    local_face_neighbor.append(-1)
+                    local_face_area.append(data.face_area[face_idx])
+                    local_face_normal.append(data.face_normal[face_idx])
+                    local_face_centers.append(data.face_centers[face_idx])
+            else:
+                if o in cell_set and n in cell_set:
+                    local_face_owner.append(global_to_local[o])
+                    local_face_neighbor.append(global_to_local[n])
+                    local_face_area.append(data.face_area[face_idx])
+                    local_face_normal.append(data.face_normal[face_idx])
+                    local_face_centers.append(data.face_centers[face_idx])
+
+        # Step 8: Build partition data
+        all_cells_arr = np.array(all_cells, dtype=np.int64)
+
+        is_halo = np.zeros(len(all_cells), dtype=np.int8)
+        is_halo[n_owned:] = 1
+
+        partition = VolumePartitionData(
+            cell_centers=data.cell_centers[all_cells_arr],
+            cell_fields=data.volume_fields[all_cells_arr],
+            cell_volumes=data.cell_volumes[all_cells_arr],
+            is_halo=is_halo,
+            n_owned_cells=n_owned,
+            face_owner=np.array(local_face_owner, dtype=np.int32),
+            face_neighbor=np.array(local_face_neighbor, dtype=np.int32),
+            face_area=np.array(local_face_area, dtype=np.float32),
+            face_normal=(
+                np.vstack(local_face_normal).astype(np.float32)
+                if local_face_normal
+                else np.empty((0, 3), dtype=np.float32)
+            ),
+            face_centers=(
+                np.vstack(local_face_centers).astype(np.float32)
+                if local_face_centers
+                else np.empty((0, 3), dtype=np.float32)
+            ),
+        )
+        partitions.append(partition)
+
+        n_halo = len(halo_list)
+        n_faces = len(local_face_owner)
+        logger.info(
+            f"  Partition {part_id}: "
+            f"{n_owned} owned + {n_halo} halo cells, {n_faces} faces"
+        )
+
+    logger.info(
+        f"  {len(partitions)} partitions built in {time.time() - t2:.2f}s"
+    )
+
+    # Step 9: Store partitions, release intermediate arrays
+    data.volume_partitions = partitions
+    data.face_owner = None
+    data.face_neighbor = None
+    data.face_area = None
+    data.face_normal = None
+    data.face_centers = None
+    data.cell_centers = None
+    data.cell_volumes = None
 
     return data
