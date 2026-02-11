@@ -282,6 +282,45 @@ class ExternalAerodynamicsDataSource(DataSource):
             else:
                 self.logger.warning(f"{field} is absent in the dataset")
 
+        # Write partition groups if partitioning was applied
+        if data.volume_partitions is not None:
+            root.attrs["num_partitions"] = len(data.volume_partitions)
+
+            for part_idx, partition in enumerate(data.volume_partitions):
+                group = root.create_group(f"partition_{part_idx}")
+                group.attrs["n_owned_cells"] = partition.n_owned_cells
+
+                for field in [
+                    "cell_centers",
+                    "cell_fields",
+                    "cell_volumes",
+                    "face_area",
+                    "face_normal",
+                    "face_centers",
+                ]:
+                    array_info = getattr(partition, field)
+                    group.create_array(
+                        name=field,
+                        data=array_info.data,
+                        chunks=array_info.chunks,
+                        shards=array_info.shards,
+                        compressors=(
+                            array_info.compressor if array_info.compressor else None
+                        ),
+                    )
+
+                for field in ["is_halo", "face_owner", "face_neighbor"]:
+                    array_info = getattr(partition, field)
+                    group.create_array(
+                        name=field,
+                        data=array_info.data,
+                        chunks=array_info.chunks,
+                        shards=array_info.shards,
+                        compressors=(
+                            array_info.compressor if array_info.compressor else None
+                        ),
+                    )
+
     def should_skip(self, filename: str) -> bool:
         """Checks whether the file should be skipped.
 
