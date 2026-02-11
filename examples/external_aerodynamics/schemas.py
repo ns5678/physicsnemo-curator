@@ -141,7 +141,6 @@ class VolumePartitionData:
     # Cell data — ordered: owned first, then halo
     cell_centers: np.ndarray  # (n_cells, 3) float32
     cell_fields: np.ndarray  # (n_cells, n_vars) float32
-    cell_volumes: np.ndarray  # (n_cells,) float32
     is_halo: np.ndarray  # (n_cells,) int8, 0=owned, 1=halo
     n_owned_cells: int
 
@@ -152,6 +151,9 @@ class VolumePartitionData:
     face_normal: np.ndarray  # (n_faces, 3) float32
     face_centers: np.ndarray  # (n_faces, 3) float32
 
+    # Optional fields (must come after required fields)
+    cell_volumes: Optional[np.ndarray] = None  # (n_cells,) float32, optional for steady-state
+
 
 @dataclass(frozen=True)
 class VolumePartitionZarrData:
@@ -159,7 +161,6 @@ class VolumePartitionZarrData:
 
     cell_centers: PreparedZarrArrayInfo
     cell_fields: PreparedZarrArrayInfo
-    cell_volumes: PreparedZarrArrayInfo
     is_halo: PreparedZarrArrayInfo
     n_owned_cells: int
     face_owner: PreparedZarrArrayInfo
@@ -168,11 +169,13 @@ class VolumePartitionZarrData:
     face_normal: PreparedZarrArrayInfo
     face_centers: PreparedZarrArrayInfo
 
+    # Optional fields (must come after required fields)
+    cell_volumes: Optional[PreparedZarrArrayInfo] = None  # optional for steady-state
+
 
 @dataclass(frozen=True)
 class ExternalAerodynamicsZarrDataInMemory:
-    """Container for External Aerodynamics data prepared for Zarr storage.
-
+    """Container for External Aerodynamics data prepared py-spy record --format raw -o profile_raw.txt -- python benchmark_fvm_ops.py
     Version history:
     - 1.0: Initial version with prepared arrays for Zarr storage
     - 1.1: Added global_params_values and global_params_reference as top-level datasets

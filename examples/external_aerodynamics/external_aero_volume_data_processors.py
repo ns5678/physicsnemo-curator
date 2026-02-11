@@ -15,7 +15,6 @@
 # limitations under the License.
 
 import logging
-import time
 from typing import Optional
 
 import numpy as np
@@ -271,7 +270,7 @@ def shuffle_volume_data(
 # ---------------------------------------------------------------------------
 
 
-@njit(fastmath=True)
+@njit(fastmath=True, cache=True)
 def _compute_face_geometry_numba(point_ids, points, cell_center):
     """Compute face area, normal, and center using numba."""
     n_points = len(point_ids)
@@ -317,7 +316,6 @@ def _build_face_connectivity(ugrid):
     from vtk.util import numpy_support
 
     logger.info("Building face connectivity...")
-    t0 = time.time()
 
     n_cells = ugrid.GetNumberOfCells()
     points = numpy_support.vtk_to_numpy(ugrid.GetPoints().GetData()).astype(np.float64)
@@ -381,7 +379,7 @@ def _build_face_connectivity(ugrid):
         face_normal.append(normal)
         face_center_list.append(fc)
 
-    logger.info(f"  {len(face_owner):,} faces built in {time.time() - t0:.2f}s")
+    logger.info(f"  {len(face_owner):,} faces built")
 
     return {
         "n_faces": len(face_owner),
@@ -391,6 +389,356 @@ def _build_face_connectivity(ugrid):
         "face_normal": np.array(face_normal, dtype=np.float32),
         "face_centers": np.array(face_center_list, dtype=np.float32),
     }
+
+
+def _build_face_connectivity_optimized(ugrid):
+    """Build face connectivity from VTK unstructured grid (optimized version).
+
+    TODO: Optimize the face extraction loop (lines 330-348 equivalent).
+    """
+    from vtk.util import numpy_support
+
+    logger.info("Building face connectivity (optimized)...")
+
+    n_cells = ugrid.GetNumberOfCells()
+    points = numpy_support.vtk_to_numpy(ugrid.GetPoints().GetData()).astype(np.float64)
+
+    cell_centers_filter = vtk.vtkCellCenters()
+    cell_centers_filter.SetInputData(ugrid)
+    cell_centers_filter.Update()
+    cell_centers = numpy_support.vtk_to_numpy(
+        cell_centers_filter.GetOutput().GetPoints().GetData()
+    ).astype(np.float64)
+
+    # --- BEGIN: Face extraction loop (Option A: fetch IDs once) ---
+    face_to_cells = {}
+    for cell_idx in tqdm(range(n_cells), desc="  Extracting faces", unit="cells"):
+        cell = ugrid.GetCell(cell_idx)
+        n_faces = cell.GetNumberOfFaces()
+        for face_idx in range(n_faces):
+            face = cell.GetFace(face_idx)
+            face_point_ids = face.GetPointIds()
+            n_pts = face_point_ids.GetNumberOfIds()
+
+            # Fetch point IDs once (was: two separate list comprehensions)
+            face_pts_arr = np.array(
+                [face_point_ids.GetId(i) for i in range(n_pts)], dtype=np.int64
+            )
+            face_pts_key = tuple(np.sort(face_pts_arr))
+
+            if face_pts_key not in face_to_cells:
+                face_to_cells[face_pts_key] = []
+            face_to_cells[face_pts_key].append((cell_idx, face_pts_arr))
+    # --- END: Face extraction loop ---
+
+    face_owner = []
+    face_neighbor = []
+    face_area = []
+    face_normal = []
+    face_center_list = []
+
+    for face_pts_sorted, cell_list in tqdm(
+        face_to_cells.items(), desc="  Computing geometry", unit="faces"
+    ):
+        if len(cell_list) == 2:
+            (cell1, pts1), (cell2, pts2) = cell_list
+            owner, neighbor = (cell1, cell2) if cell1 < cell2 else (cell2, cell1)
+            face_pts = pts1
+        elif len(cell_list) == 1:
+            owner = cell_list[0][0]
+            neighbor = -1
+            face_pts = cell_list[0][1]
+        else:
+            continue
+
+        area, normal, fc = _compute_face_geometry_numba(
+            face_pts, points, cell_centers[owner]
+        )
+        if area < 1e-30:
+            continue
+
+        face_owner.append(owner)
+        face_neighbor.append(neighbor)
+        face_area.append(area)
+        face_normal.append(normal)
+        face_center_list.append(fc)
+
+    logger.info(f"  {len(face_owner):,} faces built")
+
+    return {
+        "n_faces": len(face_owner),
+        "face_owner": np.array(face_owner, dtype=np.int32),
+        "face_neighbor": np.array(face_neighbor, dtype=np.int32),
+        "face_area": np.array(face_area, dtype=np.float32),
+        "face_normal": np.array(face_normal, dtype=np.float32),
+        "face_centers": np.array(face_center_list, dtype=np.float32),
+    }
+
+
+def _build_adjacency_vtk(ugrid):
+    """Build cell adjacency graph via VTK face sharing.
+
+    Two cells are adjacent if they share a face (exact, no heuristic).
+    Uses the same GetCell/GetFace loop as partition_mesh.py but skips
+    geometry computation — only builds the face-to-cell mapping needed
+    for adjacency.
+
+    Args:
+        ugrid: vtkUnstructuredGrid
+
+    Returns:
+        adjacency: list of lists, adjacency[i] = neighbor cell IDs for cell i
+    """
+    n_cells = ugrid.GetNumberOfCells()
+
+    # Map each unique face (sorted point IDs) to the cells that share it
+    face_to_cells = {}
+    for cell_id in tqdm(range(n_cells), desc="  Building adjacency", unit="cells"):
+        cell = ugrid.GetCell(cell_id)
+        n_faces = cell.GetNumberOfFaces()
+        for face_idx in range(n_faces):
+            face = cell.GetFace(face_idx)
+            face_point_ids = face.GetPointIds()
+            n_pts = face_point_ids.GetNumberOfIds()
+            face_key = tuple(sorted(
+                face_point_ids.GetId(i) for i in range(n_pts)
+            ))
+            if face_key not in face_to_cells:
+                face_to_cells[face_key] = []
+            face_to_cells[face_key].append(cell_id)
+
+    # Derive adjacency: two cells sharing a face are neighbors
+    adjacency = [[] for _ in range(n_cells)]
+    n_internal = 0
+    n_boundary = 0
+    for cell_list in face_to_cells.values():
+        if len(cell_list) == 2:
+            a, b = cell_list
+            adjacency[a].append(b)
+            adjacency[b].append(a)
+            n_internal += 1
+        elif len(cell_list) == 1:
+            n_boundary += 1
+
+    logger.info(
+        f"  VTK adjacency: {n_cells:,} cells, "
+        f"{n_internal:,} internal faces, {n_boundary:,} boundary faces"
+    )
+
+    return adjacency
+
+
+def _process_partition(sub_mesh):
+    """Build face connectivity and geometry for a single partition sub-mesh.
+
+    Intended to run inside a joblib worker process. Reuses
+    _build_face_connectivity_optimized on the extracted sub-mesh.
+
+    Args:
+        sub_mesh: PyVista UnstructuredGrid from mesh.extract_cells().
+            Expected cell_data keys:
+                "is_halo"        — int8 array (0=owned, 1=halo)
+                "n_owned"        — int32 array (constant, n_owned cells)
+                "volume_fields"  — float32 array (n_cells, n_vars)
+
+    Returns:
+        VolumePartitionData or None if sub-mesh is empty.
+    """
+    from schemas import VolumePartitionData
+
+    n_cells = sub_mesh.n_cells
+    if n_cells == 0:
+        return None
+
+    n_owned = int(sub_mesh.cell_data["n_owned"][0])
+    is_halo = sub_mesh.cell_data["is_halo"]
+    volume_fields = sub_mesh.cell_data["volume_fields"]
+
+    # Reuse existing optimized face connectivity builder
+    face_data = _build_face_connectivity_optimized(sub_mesh)
+
+    # Cell centers (fast VTK filter on small sub-mesh)
+    cell_centers = np.array(
+        sub_mesh.cell_centers().points, dtype=np.float32
+    )
+
+    return VolumePartitionData(
+        cell_centers=cell_centers,
+        cell_fields=volume_fields,
+        is_halo=is_halo,
+        n_owned_cells=n_owned,
+        face_owner=face_data["face_owner"],
+        face_neighbor=face_data["face_neighbor"],
+        face_area=face_data["face_area"],
+        face_normal=face_data["face_normal"],
+        face_centers=face_data["face_centers"],
+        cell_volumes=None,
+    )
+
+
+def compute_fvm_and_partition_parallel(
+    data: ExternalAerodynamicsExtractedDataInMemory,
+    num_partitions: int = 100,
+    halo_depth: int = 1,
+    n_jobs: int = -1,
+) -> ExternalAerodynamicsExtractedDataInMemory:
+    """Partition mesh via METIS, then build face connectivity per partition in parallel.
+
+    Replaces the serial compute_fvm_connectivity + partition_volume_mesh pipeline.
+    Face connectivity is never computed globally — it is built per partition
+    inside parallel workers, reducing both wall-clock time and peak memory.
+
+    Architecture:
+        Phase 1 (serial): NumPy adjacency → METIS → halo expansion → extract_cells
+        Phase 2 (parallel): per-partition face connectivity + geometry via joblib
+        Phase 3 (serial): collect results, store on data object
+
+    Args:
+        data: data object with volume_unstructured_grid and volume_fields
+        num_partitions: number of METIS partitions
+        halo_depth: ghost cell layers (1 for first-order FVM)
+        n_jobs: parallel workers (-1 = all CPUs)
+
+    Returns:
+        data with volume_partitions populated, volume_unstructured_grid set to None
+    """
+    import time as _time
+
+    import pymetis
+    import pyvista as pv
+    from joblib import Parallel, delayed
+
+    ugrid = data.volume_unstructured_grid
+    if ugrid is None:
+        raise ValueError("volume_unstructured_grid is None. Cannot partition.")
+
+    n_cells = ugrid.GetNumberOfCells()
+    logger.info(
+        f"[{data.metadata.filename}] compute_fvm_and_partition_parallel: "
+        f"{n_cells:,} cells → {num_partitions} partitions, "
+        f"halo_depth={halo_depth}, n_jobs={n_jobs}"
+    )
+
+    # === Phase 1: Serial setup ===
+
+    # Step 1-2: Build adjacency via VTK face sharing (exact)
+    _t0 = _time.perf_counter()
+    logger.info("  Phase 1: Building adjacency (VTK face loop)...")
+    adjacency = _build_adjacency_vtk(ugrid)
+    _t1 = _time.perf_counter()
+    logger.info(f"  [timer] adjacency: {_t1 - _t0:.2f}s")
+
+    # Step 3: METIS partitioning
+    logger.info("  Phase 1: METIS partitioning...")
+    adjacency_copy = [list(nbrs) for nbrs in adjacency]  # pymetis mutates input
+    n_cuts, membership = pymetis.part_graph(
+        num_partitions, adjacency=adjacency_copy
+    )
+    _t2 = _time.perf_counter()
+    logger.info(f"  METIS: {n_cuts:,} edge cuts")
+    logger.info(f"  [timer] METIS: {_t2 - _t1:.2f}s")
+
+    # Step 4: Identify interface cells and BFS halo expansion
+    logger.info("  Phase 1: Halo expansion...")
+    interface_cells = [set() for _ in range(num_partitions)]
+    for cell_id in range(n_cells):
+        for nbr in adjacency[cell_id]:
+            if membership[cell_id] != membership[nbr]:
+                interface_cells[membership[cell_id]].add(cell_id)
+                break  # cell is interface, no need to check more neighbors
+
+    partition_cells = []  # list of (owned_list, halo_list)
+    for part_id in range(num_partitions):
+        owned = {i for i, p in enumerate(membership) if p == part_id}
+        if len(owned) == 0:
+            partition_cells.append(([], []))
+            continue
+
+        halo = set()
+        frontier = interface_cells[part_id]
+
+        for _ in range(halo_depth):
+            next_frontier = set()
+            for cell_id in frontier:
+                for nbr in adjacency[cell_id]:
+                    if nbr not in owned and nbr not in halo:
+                        halo.add(nbr)
+                        next_frontier.add(nbr)
+            frontier = next_frontier
+
+        partition_cells.append((sorted(owned), sorted(halo)))
+
+    _t3 = _time.perf_counter()
+    logger.info(f"  [timer] halo expansion: {_t3 - _t2:.2f}s")
+
+    # Step 5: Extract sub-meshes with cell data attached
+    logger.info("  Phase 1: Extracting sub-meshes...")
+    mesh = pv.wrap(ugrid)
+
+    # Attach volume_fields so extract_cells auto-slices it
+    mesh.cell_data["volume_fields"] = data.volume_fields
+
+    sub_meshes = []
+    for part_id, (owned_list, halo_list) in enumerate(partition_cells):
+        all_cells = owned_list + halo_list
+        if len(all_cells) == 0:
+            sub_meshes.append(None)
+            continue
+
+        n_owned = len(owned_list)
+        sub_mesh = mesh.extract_cells(all_cells)
+
+        # Attach partition metadata for the worker
+        is_halo = np.zeros(len(all_cells), dtype=np.int8)
+        is_halo[n_owned:] = 1
+        sub_mesh.cell_data["is_halo"] = is_halo
+        sub_mesh.cell_data["n_owned"] = np.full(
+            len(all_cells), n_owned, dtype=np.int32
+        )
+
+        sub_meshes.append(sub_mesh)
+
+    _t4 = _time.perf_counter()
+    logger.info(f"  [timer] extract sub-meshes: {_t4 - _t3:.2f}s")
+
+    # Warm up Numba cache in main process before worker dispatch
+    dummy_pts = np.array([0, 1, 2], dtype=np.int64)
+    dummy_points = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float64)
+    dummy_center = np.array([0.33, 0.33, 0.0], dtype=np.float64)
+    _compute_face_geometry_numba(dummy_pts, dummy_points, dummy_center)
+
+    # === Phase 2: Parallel face connectivity ===
+    logger.info(f"  Phase 2: Dispatching {num_partitions} partitions to {n_jobs} workers...")
+    valid_sub_meshes = [
+        (part_id, sm) for part_id, sm in enumerate(sub_meshes) if sm is not None
+    ]
+
+    results = Parallel(n_jobs=n_jobs, prefer="processes")(
+        delayed(_process_partition)(sm)
+        for _, sm in valid_sub_meshes
+    )
+    _t5 = _time.perf_counter()
+    logger.info(f"  [timer] parallel face connectivity: {_t5 - _t4:.2f}s")
+
+    # === Phase 3: Collect results ===
+    partitions = []
+    for (part_id, _), result in zip(valid_sub_meshes, results):
+        if result is not None:
+            partitions.append(result)
+            logger.info(
+                f"  Partition {part_id}: "
+                f"{result.n_owned_cells} owned + "
+                f"{len(result.is_halo) - result.n_owned_cells} halo cells, "
+                f"{len(result.face_owner)} faces"
+            )
+
+    logger.info(f"  {len(partitions)} partitions built")
+
+    # Store partitions, release large objects
+    data.volume_partitions = partitions
+    data.volume_unstructured_grid = None
+
+    return data
 
 
 def compute_fvm_connectivity(
@@ -407,6 +755,8 @@ def compute_fvm_connectivity(
     Returns:
         Data with FVM connectivity arrays populated
     """
+    import time as _time
+
     import pyvista as pv
 
     ugrid = data.volume_unstructured_grid
@@ -415,8 +765,11 @@ def compute_fvm_connectivity(
         return data
 
     # Build face connectivity (expensive VTK traversal)
+    _t0 = _time.perf_counter()
     logger.info(f"[{data.metadata.filename}] Building FVM face connectivity...")
-    face_data = _build_face_connectivity(ugrid)
+    face_data = _build_face_connectivity_optimized(ugrid)
+    _t1 = _time.perf_counter()
+    logger.info(f"  [timer] face connectivity + geometry: {_t1 - _t0:.2f}s")
 
     data.face_owner = face_data["face_owner"]
     data.face_neighbor = face_data["face_neighbor"]
@@ -427,8 +780,16 @@ def compute_fvm_connectivity(
     # Cell geometry
     mesh = pv.wrap(ugrid)
     data.cell_centers = np.array(mesh.cell_centers().points, dtype=np.float32)
-    sized = mesh.compute_cell_sizes(length=False, area=False, volume=True)
-    data.cell_volumes = np.array(sized.cell_data["Volume"], dtype=np.float32)
+    _t2 = _time.perf_counter()
+    logger.info(f"  [timer] cell centers: {_t2 - _t1:.2f}s")
+
+    # Cell volumes: only compute if needed (expensive for large meshes)
+    compute_cell_volumes = False  # Set True for unsteady/source term problems
+    if compute_cell_volumes:
+        sized = mesh.compute_cell_sizes(length=False, area=False, volume=True)
+        data.cell_volumes = np.array(sized.cell_data["Volume"], dtype=np.float32)
+    else:
+        data.cell_volumes = None
 
     logger.info(
         f"[{data.metadata.filename}] FVM: {len(data.cell_centers)} cells, "
@@ -441,6 +802,238 @@ def compute_fvm_connectivity(
 # ---------------------------------------------------------------------------
 # METIS mesh partitioning
 # ---------------------------------------------------------------------------
+
+
+def _build_single_partition(
+    part_id: int,
+    membership: list,
+    adjacency: list,
+    interface_cells_for_part: set,
+    face_candidates: list,
+    face_owner: np.ndarray,
+    face_neighbor: np.ndarray,
+    face_area: np.ndarray,
+    face_normal: np.ndarray,
+    face_centers: np.ndarray,
+    cell_centers: np.ndarray,
+    volume_fields: np.ndarray,
+    cell_volumes: np.ndarray | None,
+    halo_depth: int,
+):
+    """Build a single partition (Steps 4-8). Used by parallel version."""
+    from schemas import VolumePartitionData
+
+    # Step 4: BFS halo expansion from interface cells
+    owned = {i for i, p in enumerate(membership) if p == part_id}
+
+    if len(owned) == 0:
+        return None  # Empty partition
+
+    halo = set()
+    frontier = interface_cells_for_part
+
+    for _ in range(halo_depth):
+        next_frontier = set()
+        for cell_id in frontier:
+            for nbr in adjacency[cell_id]:
+                if nbr not in owned and nbr not in halo:
+                    halo.add(nbr)
+                    next_frontier.add(nbr)
+        frontier = next_frontier
+
+    # Step 5: Order cells — owned first, then halo
+    owned_list = sorted(owned)
+    halo_list = sorted(halo)
+    all_cells = owned_list + halo_list
+    n_owned = len(owned_list)
+
+    # Step 6: Global-to-local cell index map
+    global_to_local = {g: loc for loc, g in enumerate(all_cells)}
+    cell_set = set(all_cells)
+
+    # Step 7: Filter and remap faces
+    local_face_owner = []
+    local_face_neighbor = []
+    local_face_area = []
+    local_face_normal = []
+    local_face_centers = []
+
+    for face_idx in face_candidates:
+        o = face_owner[face_idx]
+        n = face_neighbor[face_idx]
+
+        if n == -1:
+            if o in cell_set:
+                local_face_owner.append(global_to_local[o])
+                local_face_neighbor.append(-1)
+                local_face_area.append(face_area[face_idx])
+                local_face_normal.append(face_normal[face_idx])
+                local_face_centers.append(face_centers[face_idx])
+        else:
+            if o in cell_set and n in cell_set:
+                local_face_owner.append(global_to_local[o])
+                local_face_neighbor.append(global_to_local[n])
+                local_face_area.append(face_area[face_idx])
+                local_face_normal.append(face_normal[face_idx])
+                local_face_centers.append(face_centers[face_idx])
+
+    # Step 8: Build partition data
+    all_cells_arr = np.array(all_cells, dtype=np.int64)
+
+    is_halo = np.zeros(len(all_cells), dtype=np.int8)
+    is_halo[n_owned:] = 1
+
+    partition = VolumePartitionData(
+        cell_centers=cell_centers[all_cells_arr],
+        cell_fields=volume_fields[all_cells_arr],
+        is_halo=is_halo,
+        n_owned_cells=n_owned,
+        face_owner=np.array(local_face_owner, dtype=np.int32),
+        face_neighbor=np.array(local_face_neighbor, dtype=np.int32),
+        face_area=np.array(local_face_area, dtype=np.float32),
+        face_normal=(
+            np.vstack(local_face_normal).astype(np.float32)
+            if local_face_normal
+            else np.empty((0, 3), dtype=np.float32)
+        ),
+        face_centers=(
+            np.vstack(local_face_centers).astype(np.float32)
+            if local_face_centers
+            else np.empty((0, 3), dtype=np.float32)
+        ),
+        cell_volumes=cell_volumes[all_cells_arr] if cell_volumes is not None else None,
+    )
+
+    n_halo = len(halo_list)
+    n_faces = len(local_face_owner)
+    return (part_id, partition, n_owned, n_halo, n_faces)
+
+
+def partition_volume_mesh_parallel(
+    data: ExternalAerodynamicsExtractedDataInMemory,
+    num_partitions: int = 100,
+    halo_depth: int = 1,
+    n_jobs: int = -1,
+) -> ExternalAerodynamicsExtractedDataInMemory:
+    """Parallel version of partition_volume_mesh using joblib.
+
+    Args:
+        data: data object with face connectivity arrays populated
+        num_partitions: number of METIS partitions
+        halo_depth: number of ghost cell layers (1 for first-order FVM)
+        n_jobs: number of parallel jobs (-1 = all CPUs)
+
+    Returns:
+        data with volume_partitions populated
+    """
+    import time as _time
+    from collections import defaultdict
+
+    import pymetis
+    from joblib import Parallel, delayed
+
+    if data.face_owner is None or data.face_neighbor is None:
+        raise ValueError(
+            "Face connectivity not found on data object. "
+            "Run compute_fvm_connectivity before partition_volume_mesh."
+        )
+
+    n_cells = len(data.cell_centers)
+    face_owner = data.face_owner
+    face_neighbor = data.face_neighbor
+
+    logger.info(
+        f"[{data.metadata.filename}] Partitioning {n_cells} cells into "
+        f"{num_partitions} partitions with halo_depth={halo_depth} (parallel, n_jobs={n_jobs})"
+    )
+
+    _t0 = _time.perf_counter()
+
+    # Step 1: Derive cell adjacency from face_owner / face_neighbor
+    adjacency = [[] for _ in range(n_cells)]
+    internal_mask = face_neighbor >= 0
+    for o, n in zip(face_owner[internal_mask], face_neighbor[internal_mask]):
+        adjacency[o].append(n)
+        adjacency[n].append(o)
+
+    # Step 2: METIS partitioning
+    adjacency_copy = [list(nbrs) for nbrs in adjacency]
+    n_cuts, membership = pymetis.part_graph(num_partitions, adjacency=adjacency_copy)
+    logger.info(f"  METIS: {n_cuts} edge cuts")
+
+    # Step 3: Identify interface cells per partition
+    interface_cells = [set() for _ in range(num_partitions)]
+    for face_idx in range(len(face_owner)):
+        o = face_owner[face_idx]
+        n = face_neighbor[face_idx]
+        if n < 0:
+            continue
+        if membership[o] != membership[n]:
+            interface_cells[membership[o]].add(o)
+            interface_cells[membership[n]].add(n)
+
+    # Step 3b: Build face-to-partition candidate index
+    partition_face_candidates = defaultdict(list)
+    for face_idx in range(len(face_owner)):
+        o = face_owner[face_idx]
+        n = face_neighbor[face_idx]
+        if n == -1:
+            partition_face_candidates[membership[o]].append(face_idx)
+        else:
+            partition_face_candidates[membership[o]].append(face_idx)
+            if membership[n] != membership[o]:
+                partition_face_candidates[membership[n]].append(face_idx)
+
+    _t1 = _time.perf_counter()
+    logger.info(f"  [timer] METIS + partition setup: {_t1 - _t0:.2f}s")
+
+    # Steps 4-8: Build partitions in parallel
+    results = Parallel(n_jobs=n_jobs, prefer="processes")(
+        delayed(_build_single_partition)(
+            part_id=part_id,
+            membership=membership,
+            adjacency=adjacency,
+            interface_cells_for_part=interface_cells[part_id],
+            face_candidates=partition_face_candidates[part_id],
+            face_owner=face_owner,
+            face_neighbor=face_neighbor,
+            face_area=data.face_area,
+            face_normal=data.face_normal,
+            face_centers=data.face_centers,
+            cell_centers=data.cell_centers,
+            volume_fields=data.volume_fields,
+            cell_volumes=data.cell_volumes,
+            halo_depth=halo_depth,
+        )
+        for part_id in range(num_partitions)
+    )
+    _t2 = _time.perf_counter()
+    logger.info(f"  [timer] parallel partition work: {_t2 - _t1:.2f}s")
+
+    # Collect results, filter out empty partitions
+    partitions = []
+    for result in results:
+        if result is not None:
+            part_id, partition, n_owned, n_halo, n_faces = result
+            partitions.append(partition)
+            logger.info(
+                f"  Partition {part_id}: "
+                f"{n_owned} owned + {n_halo} halo cells, {n_faces} faces"
+            )
+
+    logger.info(f"  {len(partitions)} partitions built")
+
+    # Step 9: Store partitions, release intermediate arrays
+    data.volume_partitions = partitions
+    data.face_owner = None
+    data.face_neighbor = None
+    data.face_area = None
+    data.face_normal = None
+    data.face_centers = None
+    data.cell_centers = None
+    data.cell_volumes = None
+
+    return data
 
 
 def partition_volume_mesh(
@@ -487,19 +1080,16 @@ def partition_volume_mesh(
     )
 
     # Step 1: Derive cell adjacency from face_owner / face_neighbor
-    t0 = time.time()
     adjacency = [[] for _ in range(n_cells)]
     internal_mask = face_neighbor >= 0
     for o, n in zip(face_owner[internal_mask], face_neighbor[internal_mask]):
         adjacency[o].append(n)
         adjacency[n].append(o)
-    logger.info(f"  Adjacency derived in {time.time() - t0:.2f}s")
 
     # Step 2: METIS partitioning
-    t1 = time.time()
     adjacency_copy = [list(nbrs) for nbrs in adjacency]  # pymetis mutates input
     n_cuts, membership = pymetis.part_graph(num_partitions, adjacency=adjacency_copy)
-    logger.info(f"  METIS: {n_cuts} edge cuts in {time.time() - t1:.2f}s")
+    logger.info(f"  METIS: {n_cuts} edge cuts")
 
     # Step 3: Identify interface cells per partition
     interface_cells = [set() for _ in range(num_partitions)]
@@ -525,7 +1115,6 @@ def partition_volume_mesh(
                 partition_face_candidates[membership[n]].append(face_idx)
 
     # Steps 4-8: Build each partition
-    t2 = time.time()
     partitions = []
 
     for part_id in range(num_partitions):
@@ -593,7 +1182,9 @@ def partition_volume_mesh(
         partition = VolumePartitionData(
             cell_centers=data.cell_centers[all_cells_arr],
             cell_fields=data.volume_fields[all_cells_arr],
-            cell_volumes=data.cell_volumes[all_cells_arr],
+            cell_volumes=data.cell_volumes[all_cells_arr]
+            if data.cell_volumes is not None
+            else None,
             is_halo=is_halo,
             n_owned_cells=n_owned,
             face_owner=np.array(local_face_owner, dtype=np.int32),
@@ -619,9 +1210,7 @@ def partition_volume_mesh(
             f"{n_owned} owned + {n_halo} halo cells, {n_faces} faces"
         )
 
-    logger.info(
-        f"  {len(partitions)} partitions built in {time.time() - t2:.2f}s"
-    )
+    logger.info(f"  {len(partitions)} partitions built")
 
     # Step 9: Store partitions, release intermediate arrays
     data.volume_partitions = partitions
