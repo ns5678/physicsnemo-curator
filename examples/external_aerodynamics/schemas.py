@@ -89,8 +89,19 @@ class ExternalAerodynamicsExtractedDataInMemory:
     surface_fields: Optional[np.ndarray] = None
 
     # Processed volume data
-    volume_mesh_centers: Optional[np.ndarray] = None
-    volume_fields: Optional[np.ndarray] = None
+    volume_mesh_centers: Optional[np.ndarray] = None  # (N_cells, 3)
+    volume_fields: Optional[np.ndarray] = None  # (N_cells, n_vars)
+
+    # Face connectivity data (populated by compute_fvm_connectivity)
+    face_owner: Optional[np.ndarray] = None  # (N_faces,) int32
+    face_neighbor: Optional[np.ndarray] = None  # (N_faces,) int32, -1 for boundary
+    face_area: Optional[np.ndarray] = None  # (N_faces,) float32
+    face_normal: Optional[np.ndarray] = None  # (N_faces, 3) float32
+    face_centers: Optional[np.ndarray] = None  # (N_faces, 3) float32
+    cell_volumes: Optional[np.ndarray] = None  # (N_cells,) float32
+
+    # Partitioned volume data (populated by partition_volume_mesh)
+    volume_partitions: Optional[list["VolumePartitionData"]] = None
 
     # Global parameters - simulation-wide global quantities used as conditioning inputs
     # for ML models. These capture operating global conditions that affect the entire flow field.
@@ -117,6 +128,46 @@ class PreparedZarrArrayInfo:
     shards: Optional[tuple[int, ...]] = None
 
 
+@dataclass
+class VolumePartitionData:
+    """A self-contained mesh partition with partition-local indices.
+
+    Cell ordering: owned cells first, then halo cells.
+    Face indices are partition-local (0-indexed within this partition).
+    Domain boundary faces have face_neighbor = -1.
+    """
+
+    # Cell data — ordered: owned first, then halo
+    cell_centers: np.ndarray  # (n_cells, 3) float32
+    cell_fields: np.ndarray  # (n_cells, n_vars) float32
+    cell_volumes: np.ndarray  # (n_cells,) float32
+    is_halo: np.ndarray  # (n_cells,) int8, 0=owned, 1=halo
+    n_owned_cells: int
+
+    # Face data — partition-local indices
+    face_owner: np.ndarray  # (n_faces,) int32
+    face_neighbor: np.ndarray  # (n_faces,) int32, -1 for domain boundary
+    face_area: np.ndarray  # (n_faces,) float32
+    face_normal: np.ndarray  # (n_faces, 3) float32
+    face_centers: np.ndarray  # (n_faces, 3) float32
+
+
+@dataclass(frozen=True)
+class VolumePartitionZarrData:
+    """A mesh partition prepared for Zarr storage."""
+
+    cell_centers: PreparedZarrArrayInfo
+    cell_fields: PreparedZarrArrayInfo
+    cell_volumes: PreparedZarrArrayInfo
+    is_halo: PreparedZarrArrayInfo
+    n_owned_cells: int
+    face_owner: PreparedZarrArrayInfo
+    face_neighbor: PreparedZarrArrayInfo
+    face_area: PreparedZarrArrayInfo
+    face_normal: PreparedZarrArrayInfo
+    face_centers: PreparedZarrArrayInfo
+
+
 @dataclass(frozen=True)
 class ExternalAerodynamicsZarrDataInMemory:
     """Container for External Aerodynamics data prepared for Zarr storage.
@@ -141,9 +192,13 @@ class ExternalAerodynamicsZarrDataInMemory:
     surface_areas: Optional[PreparedZarrArrayInfo] = None
     surface_fields: Optional[PreparedZarrArrayInfo] = None
 
-    # Volume data
+    # Volume data (used when partitioning is disabled)
     volume_mesh_centers: Optional[PreparedZarrArrayInfo] = None
     volume_fields: Optional[PreparedZarrArrayInfo] = None
+
+    # Partitioned volume data (used when partitioning is enabled)
+    # Written as Zarr groups: partition_0/, partition_1/, ...
+    volume_partitions: Optional[list["VolumePartitionZarrData"]] = None
 
     # Global parameters
     # Refer to the description provided in dataclass
