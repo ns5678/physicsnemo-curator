@@ -370,7 +370,7 @@ def _build_face_connectivity(ugrid):
         area, normal, fc = _compute_face_geometry_numba(
             face_pts, points, cell_centers[owner]
         )
-        if area < 1e-30:
+        if area < 1e-12:
             continue
 
         face_owner.append(owner)
@@ -410,9 +410,8 @@ def _build_face_connectivity_optimized(ugrid):
         cell_centers_filter.GetOutput().GetPoints().GetData()
     ).astype(np.float64)
 
-    # --- BEGIN: Face extraction loop (Option A: fetch IDs once) ---
     face_to_cells = {}
-    for cell_idx in tqdm(range(n_cells), desc="  Extracting faces", unit="cells"):
+    for cell_idx in range(n_cells):
         cell = ugrid.GetCell(cell_idx)
         n_faces = cell.GetNumberOfFaces()
         for face_idx in range(n_faces):
@@ -429,7 +428,6 @@ def _build_face_connectivity_optimized(ugrid):
             if face_pts_key not in face_to_cells:
                 face_to_cells[face_pts_key] = []
             face_to_cells[face_pts_key].append((cell_idx, face_pts_arr))
-    # --- END: Face extraction loop ---
 
     face_owner = []
     face_neighbor = []
@@ -437,9 +435,7 @@ def _build_face_connectivity_optimized(ugrid):
     face_normal = []
     face_center_list = []
 
-    for face_pts_sorted, cell_list in tqdm(
-        face_to_cells.items(), desc="  Computing geometry", unit="faces"
-    ):
+    for cell_list in face_to_cells.values():
         if len(cell_list) == 2:
             (cell1, pts1), (cell2, pts2) = cell_list
             owner, neighbor = (cell1, cell2) if cell1 < cell2 else (cell2, cell1)
@@ -500,9 +496,7 @@ def _build_adjacency_vtk(ugrid):
             face = cell.GetFace(face_idx)
             face_point_ids = face.GetPointIds()
             n_pts = face_point_ids.GetNumberOfIds()
-            face_key = tuple(sorted(
-                face_point_ids.GetId(i) for i in range(n_pts)
-            ))
+            face_key = tuple(sorted(face_point_ids.GetId(i) for i in range(n_pts)))
             if face_key not in face_to_cells:
                 face_to_cells[face_key] = []
             face_to_cells[face_key].append(cell_id)
@@ -558,9 +552,7 @@ def _process_partition(sub_mesh):
     face_data = _build_face_connectivity_optimized(sub_mesh)
 
     # Cell centers (fast VTK filter on small sub-mesh)
-    cell_centers = np.array(
-        sub_mesh.cell_centers().points, dtype=np.float32
-    )
+    cell_centers = np.array(sub_mesh.cell_centers().points, dtype=np.float32)
 
     return VolumePartitionData(
         cell_centers=cell_centers,
@@ -581,6 +573,7 @@ def compute_fvm_and_partition_parallel(
     num_partitions: int = 100,
     halo_depth: int = 1,
     n_jobs: int = -1,
+    batch_size: int = 32,
 ) -> ExternalAerodynamicsExtractedDataInMemory:
     """Partition mesh via METIS, then build face connectivity per partition in parallel.
 
@@ -589,15 +582,24 @@ def compute_fvm_and_partition_parallel(
     inside parallel workers, reducing both wall-clock time and peak memory.
 
     Architecture:
-        Phase 1 (serial): NumPy adjacency → METIS → halo expansion → extract_cells
-        Phase 2 (parallel): per-partition face connectivity + geometry via joblib
-        Phase 3 (serial): collect results, store on data object
+        Phase 1 (serial): VTK adjacency → METIS → halo expansion
+        Phase 2 (batched parallel): extract batch_size sub-meshes from parent,
+            dispatch to joblib workers for face connectivity, free batch, repeat
+        Phase 3 (serial): cleanup, store results on data object
+
+    Memory strategy: sub-meshes are extracted in batches of batch_size from the
+    parent mesh (which stays alive until all batches are done). Each batch's
+    sub-meshes are freed after processing. This keeps peak memory at
+    parent + batch_size sub-meshes rather than parent + num_partitions sub-meshes.
+    See docs/process_parallelization_design.md for details.
 
     Args:
         data: data object with volume_unstructured_grid and volume_fields
         num_partitions: number of METIS partitions
         halo_depth: ghost cell layers (1 for first-order FVM)
         n_jobs: parallel workers (-1 = all CPUs)
+        batch_size: sub-meshes extracted and dispatched per joblib call.
+            Controls peak memory. Default 32 (2x a typical n_jobs=16).
 
     Returns:
         data with volume_partitions populated, volume_unstructured_grid set to None
@@ -616,7 +618,7 @@ def compute_fvm_and_partition_parallel(
     logger.info(
         f"[{data.metadata.filename}] compute_fvm_and_partition_parallel: "
         f"{n_cells:,} cells → {num_partitions} partitions, "
-        f"halo_depth={halo_depth}, n_jobs={n_jobs}"
+        f"halo_depth={halo_depth}, n_jobs={n_jobs}, batch_size={batch_size}"
     )
 
     # === Phase 1: Serial setup ===
@@ -631,9 +633,8 @@ def compute_fvm_and_partition_parallel(
     # Step 3: METIS partitioning
     logger.info("  Phase 1: METIS partitioning...")
     adjacency_copy = [list(nbrs) for nbrs in adjacency]  # pymetis mutates input
-    n_cuts, membership = pymetis.part_graph(
-        num_partitions, adjacency=adjacency_copy
-    )
+    n_cuts, membership = pymetis.part_graph(num_partitions, adjacency=adjacency_copy)
+    del adjacency_copy  # consumed by pymetis
     _t2 = _time.perf_counter()
     logger.info(f"  METIS: {n_cuts:,} edge cuts")
     logger.info(f"  [timer] METIS: {_t2 - _t1:.2f}s")
@@ -671,35 +672,8 @@ def compute_fvm_and_partition_parallel(
     _t3 = _time.perf_counter()
     logger.info(f"  [timer] halo expansion: {_t3 - _t2:.2f}s")
 
-    # Step 5: Extract sub-meshes with cell data attached
-    logger.info("  Phase 1: Extracting sub-meshes...")
-    mesh = pv.wrap(ugrid)
-
-    # Attach volume_fields so extract_cells auto-slices it
-    mesh.cell_data["volume_fields"] = data.volume_fields
-
-    sub_meshes = []
-    for part_id, (owned_list, halo_list) in enumerate(partition_cells):
-        all_cells = owned_list + halo_list
-        if len(all_cells) == 0:
-            sub_meshes.append(None)
-            continue
-
-        n_owned = len(owned_list)
-        sub_mesh = mesh.extract_cells(all_cells)
-
-        # Attach partition metadata for the worker
-        is_halo = np.zeros(len(all_cells), dtype=np.int8)
-        is_halo[n_owned:] = 1
-        sub_mesh.cell_data["is_halo"] = is_halo
-        sub_mesh.cell_data["n_owned"] = np.full(
-            len(all_cells), n_owned, dtype=np.int32
-        )
-
-        sub_meshes.append(sub_mesh)
-
-    _t4 = _time.perf_counter()
-    logger.info(f"  [timer] extract sub-meshes: {_t4 - _t3:.2f}s")
+    # Free Phase 1 intermediates — only partition_cells needed from here
+    del adjacency, interface_cells, membership
 
     # Warm up Numba cache in main process before worker dispatch
     dummy_pts = np.array([0, 1, 2], dtype=np.int64)
@@ -707,36 +681,84 @@ def compute_fvm_and_partition_parallel(
     dummy_center = np.array([0.33, 0.33, 0.0], dtype=np.float64)
     _compute_face_geometry_numba(dummy_pts, dummy_points, dummy_center)
 
-    # === Phase 2: Parallel face connectivity ===
-    logger.info(f"  Phase 2: Dispatching {num_partitions} partitions to {n_jobs} workers...")
-    valid_sub_meshes = [
-        (part_id, sm) for part_id, sm in enumerate(sub_meshes) if sm is not None
-    ]
+    # === Phase 2: Batched extraction + parallel face connectivity ===
+    # Wrap parent mesh once. Attach volume_fields so extract_cells auto-slices it.
+    mesh = pv.wrap(ugrid)
+    mesh.cell_data["volume_fields"] = data.volume_fields
 
-    results = Parallel(n_jobs=n_jobs, prefer="processes")(
-        delayed(_process_partition)(sm)
-        for _, sm in valid_sub_meshes
+    n_batches = (num_partitions + batch_size - 1) // batch_size
+    logger.info(
+        f"  Phase 2: {num_partitions} partitions in {n_batches} batches "
+        f"(batch_size={batch_size}, n_jobs={n_jobs})"
     )
-    _t5 = _time.perf_counter()
-    logger.info(f"  [timer] parallel face connectivity: {_t5 - _t4:.2f}s")
 
-    # === Phase 3: Collect results ===
     partitions = []
-    for (part_id, _), result in zip(valid_sub_meshes, results):
-        if result is not None:
-            partitions.append(result)
-            logger.info(
-                f"  Partition {part_id}: "
-                f"{result.n_owned_cells} owned + "
-                f"{len(result.is_halo) - result.n_owned_cells} halo cells, "
-                f"{len(result.face_owner)} faces"
+    _t_phase2_start = _time.perf_counter()
+
+    for batch_idx, batch_start in enumerate(range(0, num_partitions, batch_size)):
+        batch_end = min(batch_start + batch_size, num_partitions)
+        _tb0 = _time.perf_counter()
+
+        # Step A: Extract this batch's sub-meshes from parent
+        batch_sub_meshes = []
+        batch_part_ids = []
+        for part_id in range(batch_start, batch_end):
+            owned, halo = partition_cells[part_id]
+            all_cells = owned + halo
+            if len(all_cells) == 0:
+                continue
+
+            n_owned = len(owned)
+            sub_mesh = mesh.extract_cells(all_cells)
+
+            is_halo = np.zeros(len(all_cells), dtype=np.int8)
+            is_halo[n_owned:] = 1
+            sub_mesh.cell_data["is_halo"] = is_halo
+            sub_mesh.cell_data["n_owned"] = np.full(
+                len(all_cells), n_owned, dtype=np.int32
             )
 
+            batch_sub_meshes.append(sub_mesh)
+            batch_part_ids.append(part_id)
+
+        if len(batch_sub_meshes) == 0:
+            continue
+
+        # Step B: Dispatch to joblib workers
+        batch_results = Parallel(n_jobs=n_jobs, prefer="processes")(
+            delayed(_process_partition)(sm) for sm in batch_sub_meshes
+        )
+
+        # Step C: Collect results, free this batch's sub-meshes
+        for part_id, result in zip(batch_part_ids, batch_results):
+            if result is not None:
+                partitions.append(result)
+                logger.info(
+                    f"  Partition {part_id}: "
+                    f"{result.n_owned_cells} owned + "
+                    f"{len(result.is_halo) - result.n_owned_cells} halo cells, "
+                    f"{len(result.face_owner)} faces"
+                )
+
+        del batch_sub_meshes
+        del batch_results
+
+        _tb1 = _time.perf_counter()
+        logger.info(
+            f"  [timer] batch {batch_idx + 1}/{n_batches} "
+            f"(partitions {batch_start}-{batch_end - 1}): {_tb1 - _tb0:.2f}s"
+        )
+
+    _t_phase2_end = _time.perf_counter()
+    logger.info(f"  [timer] Phase 2 total: {_t_phase2_end - _t_phase2_start:.2f}s")
     logger.info(f"  {len(partitions)} partitions built")
 
-    # Store partitions, release large objects
+    # === Phase 3: Cleanup ===
+    del mesh
+    del partition_cells
     data.volume_partitions = partitions
     data.volume_unstructured_grid = None
+    data.volume_fields = None
 
     return data
 
@@ -786,7 +808,9 @@ def compute_fvm_connectivity(
     # Cell volumes: only compute if needed (expensive for large meshes)
     compute_cell_volumes = False  # Set True for unsteady/source term problems
     if compute_cell_volumes:
-        sized = mesh.compute_cell_sizes(length=False, area=False, volume=True)
+        sized = mesh.compute_cell_sizes(
+            length=False, area=False, vertex_count=False, volume=True
+        )
         data.cell_volumes = np.array(sized.cell_data["Volume"], dtype=np.float32)
     else:
         data.cell_volumes = None

@@ -96,12 +96,12 @@ etl:
           _partial_: true
         - _target_: external_aero_volume_data_processors.update_volume_data_to_float32
           _partial_: true
-        - _target_: external_aero_volume_data_processors.compute_fvm_connectivity
-          _partial_: true
-        - _target_: external_aero_volume_data_processors.partition_volume_mesh
+        - _target_: external_aero_volume_data_processors.compute_fvm_and_partition_parallel
           _partial_: true
           num_partitions: 100
           halo_depth: 1
+          n_jobs: 16        # total_cores / num_processes
+          batch_size: 32    # 2 * n_jobs
 
     global_params_preprocessing:
       _target_: data_transformations.ExternalAerodynamicsGlobalParamsTransformation
