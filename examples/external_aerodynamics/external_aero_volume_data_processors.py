@@ -568,7 +568,7 @@ def _process_partition(sub_mesh):
     )
 
 
-def compute_fvm_and_partition_parallel(
+def vtu_first_partition_parallel(
     data: ExternalAerodynamicsExtractedDataInMemory,
     num_partitions: int = 100,
     halo_depth: int = 1,
@@ -933,7 +933,7 @@ def _build_single_partition(
     return (part_id, partition, n_owned, n_halo, n_faces)
 
 
-def partition_volume_mesh_parallel(
+def connectivity_first_partition_parallel(
     data: ExternalAerodynamicsExtractedDataInMemory,
     num_partitions: int = 100,
     halo_depth: int = 1,
@@ -1060,7 +1060,7 @@ def partition_volume_mesh_parallel(
     return data
 
 
-def partition_volume_mesh(
+def connectivity_first_partition(
     data: ExternalAerodynamicsExtractedDataInMemory,
     num_partitions: int = 100,
     halo_depth: int = 1,
