@@ -299,6 +299,10 @@ class ExternalAerodynamicsDataSource(DataSource):
                     "face_centers",
                 ]:
                     array_info = getattr(partition, field)
+                    if array_info is None:
+                        raise ValueError(
+                            f"Partition {part_idx} missing required field '{field}'"
+                        )
                     group.create_array(
                         name=field,
                         data=array_info.data,
@@ -311,6 +315,10 @@ class ExternalAerodynamicsDataSource(DataSource):
 
                 for field in ["is_halo", "face_owner", "face_neighbor"]:
                     array_info = getattr(partition, field)
+                    if array_info is None:
+                        raise ValueError(
+                            f"Partition {part_idx} missing required field '{field}'"
+                        )
                     group.create_array(
                         name=field,
                         data=array_info.data,
