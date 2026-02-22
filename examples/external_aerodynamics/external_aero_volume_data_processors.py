@@ -52,6 +52,69 @@ def default_volume_processing_for_external_aerodynamics(
     return data
 
 
+def clip_volume_to_box(
+    data: ExternalAerodynamicsExtractedDataInMemory,
+    bounds: list[float],
+    extract_inside: bool = True,
+    extract_boundary_cells: bool = True,
+    extract_only_boundary_cells: bool = False,
+    show_progress: bool = True,
+) -> ExternalAerodynamicsExtractedDataInMemory:
+    """Clip the volume VTU to a box using vtkBox and vtkExtractGeometry.
+
+    Must be used as a volume_grid_processor (runs before default volume processing)
+    so that the clipped grid is used for mesh centers and fields extraction.
+
+    Args:
+        data: External aerodynamics data with volume_unstructured_grid set.
+        bounds: [xmin, xmax, ymin, ymax, zmin, zmax] defining the clipping box.
+        extract_inside: If True, keep cells inside the box; if False, keep outside.
+        extract_boundary_cells: Include cells that intersect the box boundary.
+        extract_only_boundary_cells: If True, keep only boundary-intersecting cells.
+        show_progress: If True, show a tqdm progress bar during clipping.
+
+    Returns:
+        Data with data.volume_unstructured_grid replaced by the clipped mesh.
+    """
+    if data.volume_unstructured_grid is None:
+        logger.warning("volume_unstructured_grid is None, skipping clip_volume_to_box")
+        return data
+
+    if len(bounds) != 6:
+        raise ValueError(
+            f"bounds must have 6 elements [xmin, xmax, ymin, ymax, zmin, zmax], got {len(bounds)}"
+        )
+
+    your_dataset = data.volume_unstructured_grid
+
+    clip_box = vtk.vtkBox()
+    clip_box.SetBounds(bounds)
+
+    extract = vtk.vtkExtractGeometry()
+    extract.SetInputData(your_dataset)
+    extract.SetImplicitFunction(clip_box)
+    extract.SetExtractInside(extract_inside)
+    extract.SetExtractBoundaryCells(extract_boundary_cells)
+    extract.SetExtractOnlyBoundaryCells(extract_only_boundary_cells)
+
+    if show_progress:
+        with tqdm(total=100, desc="Clipping volume", unit="%") as pbar:
+
+            def _update_progress(obj, _event):
+                pbar.n = int(obj.GetProgress() * 100)
+                pbar.refresh()
+
+            extract.AddObserver("ProgressEvent", _update_progress)
+            extract.Update()
+            pbar.n = 100
+            pbar.refresh()
+    else:
+        extract.Update()
+
+    data.volume_unstructured_grid = extract.GetOutput()
+    return data
+
+
 def filter_volume_invalid_cells(
     data: ExternalAerodynamicsExtractedDataInMemory,
 ) -> ExternalAerodynamicsExtractedDataInMemory:
@@ -554,9 +617,16 @@ def _process_partition(sub_mesh):
     # Cell centers (fast VTK filter on small sub-mesh)
     cell_centers = np.array(sub_mesh.cell_centers().points, dtype=np.float32)
 
+    # Cell volumes (required for FVM)
+    sized = sub_mesh.compute_cell_sizes(
+        length=False, area=False, vertex_count=False, volume=True
+    )
+    cell_volumes = np.array(sized.cell_data["Volume"], dtype=np.float32)
+
     return VolumePartitionData(
         cell_centers=cell_centers,
         cell_fields=volume_fields,
+        cell_volumes=cell_volumes,
         is_halo=is_halo,
         n_owned_cells=n_owned,
         face_owner=face_data["face_owner"],
@@ -564,7 +634,6 @@ def _process_partition(sub_mesh):
         face_area=face_data["face_area"],
         face_normal=face_data["face_normal"],
         face_centers=face_data["face_centers"],
-        cell_volumes=None,
     )
 
 
@@ -682,9 +751,10 @@ def vtu_first_partition_parallel(
     _compute_face_geometry_numba(dummy_pts, dummy_points, dummy_center)
 
     # === Phase 2: Batched extraction + parallel face connectivity ===
-    # Wrap parent mesh once. Attach volume_fields so extract_cells auto-slices it.
+    # Wrap parent mesh once. Do not rely on extract_cells to copy cell_data
+    # (PyVista may not copy Python-added arrays when extracting/serializing).
+    # We assign the slice explicitly per sub_mesh below.
     mesh = pv.wrap(ugrid)
-    mesh.cell_data["volume_fields"] = data.volume_fields
 
     n_batches = (num_partitions + batch_size - 1) // batch_size
     logger.info(
@@ -717,6 +787,11 @@ def vtu_first_partition_parallel(
             sub_mesh.cell_data["n_owned"] = np.full(
                 len(all_cells), n_owned, dtype=np.int32
             )
+            # Assign volume_fields explicitly so the worker always has it (extract_cells
+            # does not reliably copy Python-added cell_data when serializing to workers).
+            sub_mesh.cell_data["volume_fields"] = data.volume_fields[
+                np.asarray(all_cells, dtype=np.intp)
+            ]
 
             batch_sub_meshes.append(sub_mesh)
             batch_part_ids.append(part_id)
@@ -751,7 +826,15 @@ def vtu_first_partition_parallel(
 
     _t_phase2_end = _time.perf_counter()
     logger.info(f"  [timer] Phase 2 total: {_t_phase2_end - _t_phase2_start:.2f}s")
-    logger.info(f"  {len(partitions)} partitions built")
+    n_built = len(partitions)
+    n_empty = num_partitions - n_built
+    if n_empty > 0:
+        logger.info(
+            f"  {n_built} non-empty partitions built (requested {num_partitions}; "
+            f"{n_empty} partitions were empty and skipped — mesh may be small for this partition count)"
+        )
+    else:
+        logger.info(f"  {n_built} partitions built")
 
     # === Phase 3: Cleanup ===
     del mesh
@@ -805,15 +888,11 @@ def compute_fvm_connectivity(
     _t2 = _time.perf_counter()
     logger.info(f"  [timer] cell centers: {_t2 - _t1:.2f}s")
 
-    # Cell volumes: only compute if needed (expensive for large meshes)
-    compute_cell_volumes = False  # Set True for unsteady/source term problems
-    if compute_cell_volumes:
-        sized = mesh.compute_cell_sizes(
-            length=False, area=False, vertex_count=False, volume=True
-        )
-        data.cell_volumes = np.array(sized.cell_data["Volume"], dtype=np.float32)
-    else:
-        data.cell_volumes = None
+    # Cell volumes (required for partitions and FVM)
+    sized = mesh.compute_cell_sizes(
+        length=False, area=False, vertex_count=False, volume=True
+    )
+    data.cell_volumes = np.array(sized.cell_data["Volume"], dtype=np.float32)
 
     logger.info(
         f"[{data.metadata.filename}] FVM: {len(data.cell_centers)} cells, "
@@ -841,7 +920,7 @@ def _build_single_partition(
     face_centers: np.ndarray,
     cell_centers: np.ndarray,
     volume_fields: np.ndarray,
-    cell_volumes: np.ndarray | None,
+    cell_volumes: np.ndarray,
     halo_depth: int,
 ):
     """Build a single partition (Steps 4-8). Used by parallel version."""
@@ -925,7 +1004,7 @@ def _build_single_partition(
             if local_face_centers
             else np.empty((0, 3), dtype=np.float32)
         ),
-        cell_volumes=cell_volumes[all_cells_arr] if cell_volumes is not None else None,
+        cell_volumes=cell_volumes[all_cells_arr],
     )
 
     n_halo = len(halo_list)
@@ -960,6 +1039,11 @@ def connectivity_first_partition_parallel(
         raise ValueError(
             "Face connectivity not found on data object. "
             "Run compute_fvm_connectivity before partition_volume_mesh."
+        )
+    if data.cell_volumes is None:
+        raise ValueError(
+            "cell_volumes is required for partitioning. "
+            "Run compute_fvm_connectivity first (it computes cell_volumes)."
         )
 
     n_cells = len(data.cell_centers)
@@ -1093,6 +1177,11 @@ def connectivity_first_partition(
             "Face connectivity not found on data object. "
             "Run compute_fvm_connectivity before partition_volume_mesh."
         )
+    if data.cell_volumes is None:
+        raise ValueError(
+            "cell_volumes is required for partitioning. "
+            "Run compute_fvm_connectivity first (it computes cell_volumes)."
+        )
 
     n_cells = len(data.cell_centers)
     face_owner = data.face_owner
@@ -1206,9 +1295,7 @@ def connectivity_first_partition(
         partition = VolumePartitionData(
             cell_centers=data.cell_centers[all_cells_arr],
             cell_fields=data.volume_fields[all_cells_arr],
-            cell_volumes=data.cell_volumes[all_cells_arr]
-            if data.cell_volumes is not None
-            else None,
+            cell_volumes=data.cell_volumes[all_cells_arr],
             is_halo=is_halo,
             n_owned_cells=n_owned,
             face_owner=np.array(local_face_owner, dtype=np.int32),

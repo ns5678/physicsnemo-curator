@@ -243,10 +243,12 @@ class ExternalAerodynamicsVolumeTransformation(DataTransformation):
         self,
         cfg: ProcessingConfig,
         volume_variables: Optional[dict[str, str]] = None,
+        volume_grid_processors: Optional[tuple[Callable, ...]] = None,
         volume_processors: Optional[tuple[Callable, ...]] = None,
     ):
         super().__init__(cfg)
         self.volume_variables = volume_variables
+        self.volume_grid_processors = volume_grid_processors
         self.volume_processors = volume_processors
         self.constants = PhysicsConstantsCarAerodynamics()
         self.logger = logging.getLogger(__name__)
@@ -256,7 +258,8 @@ class ExternalAerodynamicsVolumeTransformation(DataTransformation):
             raise ValueError("Volume variables are empty!")
 
         self.logger.info(
-            f"Initializing ExternalAerodynamicsVolumeTransformation with volume_variables: {volume_variables} and volume_processors: {volume_processors}"
+            f"Initializing ExternalAerodynamicsVolumeTransformation with volume_variables: {volume_variables}, "
+            f"volume_grid_processors: {volume_grid_processors}, volume_processors: {volume_processors}"
         )
         self.logger.info(
             "This will only be processed if the model_type is volume/combined."
@@ -266,6 +269,12 @@ class ExternalAerodynamicsVolumeTransformation(DataTransformation):
         self, data: ExternalAerodynamicsExtractedDataInMemory
     ) -> ExternalAerodynamicsExtractedDataInMemory:
         if data.volume_unstructured_grid is not None:
+            # Run grid-level processors first (e.g. clip volume to box).
+            # These modify data.volume_unstructured_grid before mesh/fields extraction.
+            if self.volume_grid_processors is not None:
+                for processor in self.volume_grid_processors:
+                    data = processor(data)
+
             # Regardless of whether there are any additional volume processors,
             # we always apply the default volume processing.
             # This will ensure that the bare minimum criteria for volume data is met.

@@ -72,10 +72,30 @@ def get_vertices(polydata):
 
 
 def get_volume_data(polydata, variables):
-    """Function to get volume data"""
-    vertices = get_vertices(polydata)
-    point_data = polydata.GetPointData()
+    """Get volume data: cell centers (centroids) and fields at cell centers.
 
-    fields = get_fields(point_data, variables)
+    Args:
+        polydata: VTK polydata or unstructured grid with point data.
+        variables: List of array names to extract as fields.
 
-    return vertices, fields
+    Returns:
+        cell_centers: (N_cells, 3) array of cell centroid coordinates.
+        fields: List of (N_cells, ...) arrays, one per variable, at cell centers.
+    """
+    # Convert point data to cell data so fields are defined at cell centers
+    point_to_cell = vtk.vtkPointDataToCellData()
+    point_to_cell.SetInputData(polydata)
+    point_to_cell.Update()
+    grid_with_cell_data = point_to_cell.GetOutput()
+
+    # Compute cell centers (centroids) via vtkCellCenters
+    cell_centers_filter = vtk.vtkCellCenters()
+    cell_centers_filter.SetInputData(polydata)
+    cell_centers_filter.Update()
+    centers_output = cell_centers_filter.GetOutput()
+    cell_centers = numpy_support.vtk_to_numpy(centers_output.GetPoints().GetData())
+
+    # Get fields from cell data (at cell centers)
+    fields = get_fields(grid_with_cell_data.GetCellData(), variables)
+
+    return cell_centers, fields
