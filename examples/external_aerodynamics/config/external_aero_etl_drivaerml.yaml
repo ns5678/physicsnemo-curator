@@ -77,10 +77,10 @@ etl:
           preserve_topology: false
         - _target_: external_aero_surface_data_processors.normalize_surface_normals
           _partial_: true
-        - _target_: external_aero_surface_data_processors.non_dimensionalize_surface_fields
-          _partial_: true
-          air_density: 1.205  # kg/m³
-          stream_velocity: 38.89  # m/s
+        # - _target_: external_aero_surface_data_processors.non_dimensionalize_surface_fields
+        #   _partial_: true
+        #   air_density: 1.205  # kg/m³
+        #   stream_velocity: 38.89  # m/s
         - _target_: external_aero_surface_data_processors.update_surface_data_to_float32
           _partial_: true
 
@@ -102,10 +102,10 @@ etl:
       # This will ensure that the bare minimum criteria for volume data is met.
       # That is - The volume data (mesh centers and fields) are present.
       volume_processors:
-        - _target_: external_aero_volume_data_processors.non_dimensionalize_volume_fields
-          _partial_: true
-          air_density: 1.205  # kg/m³
-          stream_velocity: 38.89  # m/s
+        # - _target_: external_aero_volume_data_processors.non_dimensionalize_volume_fields
+        #   _partial_: true
+        #   air_density: 1.205  # kg/m³
+        #   stream_velocity: 38.89  # m/s
         - _target_: external_aero_volume_data_processors.update_volume_data_to_float32
           _partial_: true
         - _target_: external_aero_volume_data_processors.vtu_first_partition_parallel
